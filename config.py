@@ -74,6 +74,86 @@ DEV_PANEL_ID = f'{COMPANY_NAME}_dev_panel'
 DEV_PANEL_NAME = 'Dev'
 
 # ---------------------------------------------------------------------------
+# The Kitchen tab (job / project management)
+# ---------------------------------------------------------------------------
+# A SECOND tab, separate from the WoodCraft one, because its commands do not
+# touch geometry at all: they create and clear cloud folders for a customer's
+# job. Keeping them out of the modelling tab means a designer starting a kitchen
+# never scrolls past twenty modelling buttons to find the one they want, and the
+# tab can be handed to people who never model a cabinet themselves.
+#
+# NOTE the KITCHEN_PANEL_* constants above are a different thing: a panel of
+# whole-kitchen MODELLING commands (Countertop, Skirting, Set Finish) that lives
+# inside the WoodCraft tab. This is the tab; that is a panel.
+KITCHEN_TAB_ID = f'{COMPANY_NAME}_kitchen_tab'
+KITCHEN_TAB_NAME = 'Kitchen'
+
+KITCHEN_PROJECT_PANEL_ID = f'{COMPANY_NAME}_kitchen_project_panel'
+KITCHEN_PROJECT_PANEL_NAME = 'Kitchen Project'
+
+# ---------------------------------------------------------------------------
+# Kitchen jobs — where customer kitchens and the cabinet library live
+# ---------------------------------------------------------------------------
+# The shape on the cloud:
+#
+#   <KITCHENS_PROJECT_NAME>            project, e.g. "Clients"
+#   └── <KITCHENS_FOLDER_NAME>/        e.g. "Kitchens"
+#       ├── Kitchen Template 1/        made by Create Kitchen Template
+#       │   ├── Kitchen Template 1     hybrid design
+#       │   └── <KITCHEN_LIBRARY_FOLDER_NAME>/   copy of the master library
+#       └── Al Rashid_Kitchen_2026-09-09/   a template New Kitchen has renamed
+#           ├── Al Rashid_Kitchen_2026-09-09
+#           └── <KITCHEN_LIBRARY_FOLDER_NAME>/
+#
+# Create Kitchen Template does the slow work (folders + copying the library) up
+# front, so templates can be stocked in a quiet moment. New Kitchen then just
+# RENAMES a waiting template folder and its design — instant, no copying — and
+# Finish Kitchen later deletes whatever of the library copy went unused.
+#
+# Every name below is the EXACT display name as it appears in the Data Panel. If
+# something is renamed on the cloud, change it here: both dialogs show a red
+# cross beside anything they can't find, and list the projects they can see.
+KITCHENS_PROJECT_NAME = 'Clients'
+
+# The folder inside that project which holds the kitchen/template folders. Set
+# to '' to put them straight in the project root. Created if it doesn't exist.
+KITCHENS_FOLDER_NAME = 'Kitchens'
+
+# The master library Create Kitchen Template copies FROM: a folder inside a
+# project. Set LIBRARY_SOURCE_FOLDER to '' to copy the whole project root.
+LIBRARY_PROJECT_NAME = 'Emaar Library'
+LIBRARY_SOURCE_FOLDER = 'Kitchen Library'
+
+# What the per-kitchen copy of the library is called inside the job folder.
+KITCHEN_LIBRARY_FOLDER_NAME = 'Library'
+
+# Templates are named "<prefix> <n>" and New Kitchen offers every folder matching
+# that shape. Changing the prefix orphans templates already on the cloud (they
+# simply stop being offered), so change it before stocking any.
+KITCHEN_TEMPLATE_PREFIX = 'Kitchen Template'
+
+# What New Kitchen renames a template to. {customer} is what the designer typed,
+# {date} is today in KITCHEN_DATE_FORMAT; the literal "Kitchen" in the middle says
+# what kind of job this is, so a Clients folder can hold other project types later
+# without the names becoming ambiguous.
+#
+# A dangling separator is trimmed automatically, so an empty KITCHEN_DATE_FORMAT
+# gives "Al Rashid_Kitchen" rather than "Al Rashid_Kitchen_".
+KITCHEN_NAME_PATTERN = '{customer}_Kitchen_{date}'
+
+# The date in that pattern, in strftime form. The default sorts chronologically in
+# the Data Panel because the year leads; '%d-%m-%y' or '%d %b %y' read more
+# naturally if sorting doesn't matter. Set to '' to drop the date entirely.
+KITCHEN_DATE_FORMAT = '%Y-%m-%d'
+
+# Safety rails for the folder walks. A library is a handful of levels deep in
+# practice; the cap stops a cyclic or pathological tree from hanging Fusion.
+# MAX_LISTED only limits how many filenames the Finish Kitchen dialog PRINTS —
+# it never limits how many are deleted.
+KITCHEN_MAX_DEPTH = 12
+KITCHEN_MAX_LISTED = 200
+
+# ---------------------------------------------------------------------------
 # Hardware library
 # ---------------------------------------------------------------------------
 # The Insert Hardware command reads its catalogue from a dedicated Fusion cloud
@@ -243,6 +323,15 @@ WC_ROLES = (WC_ROLE_DOOR, WC_ROLE_FRONT, WC_ROLE_CARCASS, WC_ROLE_SKIP)
 # occurrence each column belongs to; the fix pass needs it to grow/verify a
 # table without rebuilding it.
 WC_APPEARANCE_COLS = 'appearanceColumns'
+
+# Kitchen job stamp — written on the DOCUMENT (not a component) by New Kitchen so
+# Finish Kitchen knows which cloud folder holds this kitchen's private library
+# copy, without having to guess from names. Document attributes live inside the
+# .f3d and survive renaming or moving both the design and the folder; the folder
+# NAME is only a fallback for kitchens someone assembled by hand.
+WC_KITCHEN_CUSTOMER = 'kitchenCustomer'
+WC_KITCHEN_CREATED = 'kitchenCreated'
+WC_KITCHEN_LIB_FOLDER = 'kitchenLibraryFolderId'
 
 # Future keys plug in here with no core change, e.g.:
 #   WC_PART_NO = 'partNumber'

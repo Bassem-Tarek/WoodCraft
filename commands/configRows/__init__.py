@@ -13,6 +13,7 @@
 # You should have received a copy of the GNU General Public License along with
 # this program.  If not, see <https://www.gnu.org/licenses/>.
 
-# Create Configurations command package — adds a configuration row for every
-# combination of a configured design's theme tables. Logic lives in
+# Create Configurations command package — renames the rows already in a
+# configured design's table to the naming scheme and adds a row for every
+# combination of its theme tables that is missing. Logic lives in
 # commands/config_table.py; the command is wired up by commands/__init__.py.

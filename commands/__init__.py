@@ -40,6 +40,9 @@ from .sheets import entry as sheets
 from .cutList import entry as cutList
 from .bom import entry as bom
 from .settings import entry as settings
+from .createKitchenTemplate import entry as createKitchenTemplate  # Kitchen tab
+from .newKitchen import entry as newKitchen        # Kitchen tab
+from .finishKitchen import entry as finishKitchen  # Kitchen tab
 from .renameConfigs import entry as renameConfigs  # DEV panel
 from .inspectPanels import entry as inspectPanels  # DEV — remove later
 
@@ -66,6 +69,12 @@ commands = [
     cutList,
     bom,
     settings,
+    # Kitchen tab (its own ribbon tab — cloud folders, not geometry). Listed
+    # after the modelling commands so the WoodCraft tab is created first and the
+    # Kitchen tab sits to the right of it.
+    createKitchenTemplate,
+    newKitchen,
+    finishKitchen,
     renameConfigs,  # DEV panel
     inspectPanels,  # DEV — remove later
 ]

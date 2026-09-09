@@ -15,11 +15,16 @@
 
 """Shared helpers for building WoodCraft's toolbar UI.
 
-Every WoodCraft command lives in a single custom tab ("WoodCraft") inside the
-Design workspace. Commands ask for the panel they belong to via get_panel() on
-start and tear their button down via remove_command() on stop. The tab and its
-panels are created lazily by the first command and cleaned up once the last
-command has removed its button, so no single command "owns" the tab.
+WoodCraft's commands live in custom tabs inside the Design workspace: the
+"WoodCraft" tab for everything that models or reports on cabinets, and the
+"Kitchen" tab for the per-job project commands (New Kitchen / Finish Kitchen),
+which manage cloud folders rather than geometry.
+
+Commands ask for the panel they belong to via get_panel() on start and tear their
+button down via remove_command() on stop. Both default to the WoodCraft tab, so a
+command only names a tab when it wants a different one. Tabs and panels are
+created lazily by the first command that needs them and pruned once the last
+command has removed its button, so no single command "owns" either.
 """
 
 import adsk.core
@@ -31,13 +36,20 @@ app = adsk.core.Application.get()
 ui = app.userInterface
 
 
-def get_panel(panel_id: str, panel_name: str) -> adsk.core.ToolbarPanel:
-    """Return the named panel inside the WoodCraft tab, creating both if needed."""
+def get_panel(panel_id: str, panel_name: str,
+              tab_id: str = None, tab_name: str = None) -> adsk.core.ToolbarPanel:
+    """Return the named panel inside a WoodCraft tab, creating both if needed.
+
+    tab_id/tab_name default to the main WoodCraft tab; the Kitchen commands pass
+    config.KITCHEN_TAB_ID / KITCHEN_TAB_NAME to get their own tab instead."""
     workspace = ui.workspaces.itemById(config.DESIGN_WORKSPACE_ID)
 
-    tab = workspace.toolbarTabs.itemById(config.TAB_ID)
+    tab_id = tab_id or config.TAB_ID
+    tab_name = tab_name or config.TAB_NAME
+
+    tab = workspace.toolbarTabs.itemById(tab_id)
     if not tab:
-        tab = workspace.toolbarTabs.add(config.TAB_ID, config.TAB_NAME)
+        tab = workspace.toolbarTabs.add(tab_id, tab_name)
 
     panel = tab.toolbarPanels.itemById(panel_id)
     if not panel:
@@ -46,11 +58,14 @@ def get_panel(panel_id: str, panel_name: str) -> adsk.core.ToolbarPanel:
     return panel
 
 
-def remove_command(panel_id: str, cmd_id: str):
-    """Remove a command button and its definition, then prune empty UI containers."""
+def remove_command(panel_id: str, cmd_id: str, tab_id: str = None):
+    """Remove a command button and its definition, then prune empty UI containers.
+
+    tab_id must match the one the command passed to get_panel(); it defaults to
+    the main WoodCraft tab."""
     workspace = ui.workspaces.itemById(config.DESIGN_WORKSPACE_ID)
 
-    tab = workspace.toolbarTabs.itemById(config.TAB_ID)
+    tab = workspace.toolbarTabs.itemById(tab_id or config.TAB_ID)
     if tab:
         panel = tab.toolbarPanels.itemById(panel_id)
         if panel:

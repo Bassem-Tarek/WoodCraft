@@ -13,7 +13,7 @@
 # You should have received a copy of the GNU General Public License along with
 # this program.  If not, see <https://www.gnu.org/licenses/>.
 
-"""Switching a whole kitchen's cabinets between the Gola and Other Handles themes.
+"""Switching a whole kitchen's cabinets between the Gola and Handles themes.
 
 A Gola profile is not hardware you place — it is machined into the cabinet, so it
 belongs to the cabinet's own configuration. Every other handle IS hardware, and
@@ -21,6 +21,12 @@ the cabinet has to be configured NOT to have a Gola profile before one is fitted
 So picking a handle is really two decisions, and this module makes the first one:
 every base and tall cabinet in the kitchen is switched to the Handles theme that
 matches what was picked, and only then does Fit Handles place anything.
+
+None of the names involved are matched exactly. The theme column and its two
+values are found through the alias lists in config_table, ignoring case, spacing
+and punctuation, and each library is then written using its OWN spelling of
+them — so libraries that disagree about what to call the column, or call the
+profile "Gola" where another says "Gola C Profile", are all handled in one run.
 
 Wall cabinets are left alone — WALL_PREFIXES — because they carry no Gola profile.
 
@@ -74,9 +80,23 @@ from ...lib import fusionAddInUtils as futil
 
 # The theme column that decides whether a cabinet is machined for a Gola profile,
 # and its two values. Named rather than positional: a library grows columns.
-HANDLES_THEME = 'Handles'
-GOLA_VALUE = 'Gola C Profile'
-OTHER_VALUE = 'Other Handles'
+#
+# Each is an ALIAS LIST rather than one string, because these names are typed by
+# hand into every library and drift between them — "Handles" here, "Handle Type"
+# there; "Gola" in one, "Gola C Profile" in the next. Nothing is compared as an
+# exact string: case, spacing and punctuation are ignored, the aliases are tried
+# in preference order, and whatever a library turns out to call the column and
+# its values is then used AS THAT LIBRARY SPELLS IT. A library naming things its
+# own way gets switched instead of being reported as having no Handles theme.
+HANDLES_THEME_NAMES = config_table.HANDLES_TITLES
+GOLA_VALUE_NAMES = config_table.GOLA_VALUES
+OTHER_VALUE_NAMES = config_table.HANDLE_VALUES
+
+# What to call them to the user, and what a new library should call them. Only
+# ever used for wording — never to match anything.
+HANDLES_THEME = HANDLES_THEME_NAMES[0]
+GOLA_VALUE = GOLA_VALUE_NAMES[0]
+OTHER_VALUE = OTHER_VALUE_NAMES[0]
 
 # Which cabinets take part. Base and tall units carry a Gola profile; wall units
 # do not, so switching them would be a rebuild for no change.
@@ -90,8 +110,35 @@ EXCLUDE_THEMES = config_table.EXCLUDE
 
 
 def wants_gola(handle_label):
-    """Is the chosen handle a Gola profile rather than a piece of hardware?"""
-    return 'gola' in (handle_label or '').lower()
+    """Is the chosen handle a Gola profile rather than a piece of hardware?
+
+    The word decides however it is written, so "GOLA-C 3m" and "Gola_C" in the
+    hardware library both read as Gola."""
+    return config_table.is_gola(handle_label)
+
+
+def theme_title(columns):
+    """This table's own spelling of the Handles theme column, or None."""
+    return config_table.pick_name(list(columns), HANDLES_THEME_NAMES)
+
+
+def theme_value(values, want_gola):
+    """This theme's own spelling of the value wanted, or None.
+
+    Gola is decided by the word itself: any value carrying "gola" is one, and the
+    alias list only settles which to prefer when a theme offers several. The
+    hardware value is then whatever is left — matched against its alias list
+    first, and failing that, if the theme has exactly one non-Gola value, that
+    one, whatever it happens to be called. A two-value theme therefore always
+    resolves, even when neither name is one we would have guessed."""
+    values = [value for value in values if str(value or '').strip()]
+    gola = [value for value in values if config_table.is_gola(value)]
+    if want_gola:
+        return config_table.pick_name(gola, GOLA_VALUE_NAMES) or (gola[0] if gola
+                                                                  else None)
+    rest = [value for value in values if not config_table.is_gola(value)]
+    return (config_table.pick_name(rest, OTHER_VALUE_NAMES)
+            or (rest[0] if len(rest) == 1 else None))
 
 
 # Naming comes from config_table so a row added here and a row added by Create
@@ -179,32 +226,38 @@ def _open_design(app, data_file):
 
 
 def read_table(design):
-    """(rows, theme titles) off a configured design that is ACTIVE, or (None, None).
+    """(rows, theme titles, handles title) off an ACTIVE configured design.
 
-    rows is {row name: {theme title: value name}}."""
+    (None, None, None) when it has no configuration table, or no column that
+    reads as the Handles theme. rows is {row name: {theme title: value name}},
+    and the third item is this table's own spelling of the Handles column —
+    carried around from here on so nothing has to guess at it twice."""
     table = config_table.top_table(design)
     if table is None:
-        return None, None
+        return None, None, None
     columns = config_table.theme_columns(table)
-    if HANDLES_THEME not in columns:
-        return None, None
+    title = theme_title(columns)
+    if title is None:
+        return None, None, None
     rows = {}
     for i in range(table.rows.count):
         row = table.rows.item(i)
         rows[row.name] = config_table.combination_of(columns, row)
-    return rows, list(columns)
+    return rows, list(columns), title
 
 
 class Library:
     """One configured design, its table, and the cabinets that came from it."""
 
-    __slots__ = ('data_file', 'document', 'rows', 'titles', 'refs', 'created')
+    __slots__ = ('data_file', 'document', 'rows', 'titles', 'theme', 'refs',
+                 'created')
 
-    def __init__(self, data_file, document, rows, titles):
+    def __init__(self, data_file, document, rows, titles, theme):
         self.data_file = data_file
         self.document = document
         self.rows = rows
         self.titles = titles
+        self.theme = theme          # this library's own name for the column
         self.refs = []
         self.created = 0
 
@@ -234,18 +287,18 @@ def gather(app, refs, problems):
         try:
             document.activate()
             design = adsk.fusion.Design.cast(app.activeProduct)
-            rows, titles = read_table(design)
+            rows, titles, theme = read_table(design)
         except Exception as exc:
             problems.append(f'{data_file.name}: could not be read ({exc})')
             waiting.pop(0)
             continue
         if rows is None:
-            problems.append(f'{data_file.name}: no "{HANDLES_THEME}" theme — its '
-                            f'cabinets were left alone')
+            problems.append(f'{data_file.name}: no theme reading as '
+                            f'"{HANDLES_THEME}" — its cabinets were left alone')
             waiting = [r for r in waiting if r is not seed]
             continue
 
-        library = Library(data_file, document, rows, titles)
+        library = Library(data_file, document, rows, titles, theme)
         libraries.append(library)
         left = []
         for ref in waiting:
@@ -281,19 +334,46 @@ def _match(rows, wanted):
     return None
 
 
-def decide(library, target_value, log, problems):
+def decide(library, want_gola, log, problems):
     """Give every cabinet in this library its target row, creating what is missing.
 
-    The library's document must already be active. Rows are created here but the
-    save happens once, afterwards, because a save costs about 25 seconds."""
+    The library's document must already be active. The value to switch to is
+    resolved HERE rather than passed in, because each library names its own
+    values and two libraries in one kitchen need not agree: one may offer "Gola
+    C Profile" and the next plain "Gola".
+
+    Rows are created here but the save happens once, afterwards, because a save
+    costs about 25 seconds."""
     design = adsk.fusion.Design.cast(adsk.core.Application.get().activeProduct)
     table = config_table.top_table(design)
     columns = config_table.theme_columns(table)
-    themes = {}
-    for i in range(table.customThemeTables.count):
-        theme = table.customThemeTables.item(i)
-        themes[theme.name] = theme
     prefix = library.document.name
+
+    # The column is found by name once and then used as an object. Its own
+    # referencedTable is the theme table it points at, which beats looking that
+    # table up by name a second time — a column and its theme table need not be
+    # spelled the same way.
+    title = library.theme if library.theme in columns else theme_title(columns)
+    column = columns.get(title)
+    if column is None:
+        problems.append(f'{library.data_file.name}: its "{HANDLES_THEME}" theme '
+                        f'went missing between reading and writing')
+        return
+    try:
+        values = config_table.theme_values(column)
+    except Exception as exc:
+        problems.append(f'{library.data_file.name}: could not read the '
+                        f'"{title}" values ({exc})')
+        return
+    target_value = theme_value(values, want_gola)
+    if target_value is None:
+        problems.append(f'{library.data_file.name}: its "{title}" theme has no '
+                        f'{"Gola" if want_gola else "hardware-handle"} value '
+                        f'({", ".join(values) if values else "it has no values"})')
+        return
+    if not config_table.same_name(target_value, GOLA_VALUE if want_gola
+                                  else OTHER_VALUE):
+        log(f'  {library.data_file.name}: "{title}" → "{target_value}"')
 
     for ref in library.refs:
         current = library.rows.get(ref.row_name)
@@ -301,20 +381,20 @@ def decide(library, target_value, log, problems):
             problems.append(f'{ref.name}: row "{ref.row_name}" is not in '
                             f'{library.data_file.name}')
             continue
-        if current.get(HANDLES_THEME) == target_value:
+        if config_table.same_name(current.get(title), target_value):
             continue                       # already right — costs nothing
 
         wanted = dict(current)
-        wanted[HANDLES_THEME] = target_value
+        wanted[title] = target_value
         match = _match(library.rows, wanted)
         if match is None:
             name = config_table.row_name(prefix, wanted, library.titles)
             try:
                 source = config_table.row_by_name(table, ref.row_name)
                 new_row = source.copy(name)
-                cell = columns[HANDLES_THEME].getCellByRowId(new_row.id)
+                cell = column.getCellByRowId(new_row.id)
                 cell.referencedTableRow = config_table.row_by_name(
-                    themes[HANDLES_THEME], target_value)
+                    column.referencedTable, target_value)
             except Exception as exc:
                 problems.append(f'{library.data_file.name}: could not add '
                                 f'"{name}" ({exc})')
@@ -330,7 +410,6 @@ def apply_theme(app, root, want_gola, log):
     """Switch every base and tall cabinet to the chosen Handles theme.
 
     Returns (switched, unchanged, notes, problems)."""
-    target_value = GOLA_VALUE if want_gola else OTHER_VALUE
     kitchen_doc = app.activeDocument
     problems, notes = [], []
 
@@ -342,7 +421,7 @@ def apply_theme(app, root, want_gola, log):
     for library in libraries:
         try:
             library.document.activate()
-            decide(library, target_value, log, problems)
+            decide(library, want_gola, log, problems)
         except Exception as exc:
             problems.append(f'{library.data_file.name}: {exc}')
 

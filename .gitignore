@@ -27,6 +27,7 @@ JoinerCAD_Addon_Analysis.md
 # Dev-only icon generators (the PNGs they render are what ships)
 generate_icons.py
 generate_icons_kitchen.py
+generate_icons_kitchen_tab.py
 
 # Claude Code local tooling
 .claude/

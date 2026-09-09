@@ -15,18 +15,24 @@
 
 """Line Boring — drill shelf-pin holes into a panel from a chosen rule.
 
-Pick the inner face(s) of a side/gable panel, choose a boring *rule* and a few
-numbers (shelf count, setbacks, hole size), and the command bores the shelf-pin
-hole pattern. The geometry and the rule catalogue live in commands/boring.py; this
-file is just the Fusion command around them.
+Pick the inner face(s) of a side/gable panel, pick the bottom and top panels the
+holes are split between, choose a boring *rule* and a few numbers (shelf count,
+setbacks, hole size), and the command bores the shelf-pin hole pattern. The
+geometry and the rule catalogue live in commands/boring.py; this file is just the
+Fusion command around them.
 
 The default rule is **Emaar**: three-hole sets (a middle hole plus one a pitch
-above and below), the set centres dividing the panel height into N+1 equal gaps,
-in two columns set in from the front and back edges.
+above and below), the set centres dividing the CLEAR OPENING between the bottom
+and top panels into N+1 equal gaps, in two columns set in from the front and back
+edges. Leave the top/bottom selection empty and the side panel's own ends are used
+instead (the old whole-panel behaviour).
 
 Live-parametric build: the command creates wc_lb_* user parameters and a feature
-tree (sketch -> seed HoleFeature -> 2-direction rectangular pattern) driven by
-them, so editing the parameters reflows the holes. If any step of the parametric
+tree (sketch -> seed HoleFeature -> rectangular pattern) driven by them, so editing
+the parameters reflows the holes. The opening is associative too — the bottom and
+top datums are the picked panels' faces intersected with the sketch plane, and the
+spacing is driven by a reference dimension across them, so moving a panel or
+changing its thickness redistributes the holes. If any step of the parametric
 build fails, it rolls back and falls back to a plain (numeric) HoleFeature over
 every computed point, so the command always produces correct holes.
 """
@@ -47,8 +53,9 @@ ui = app.userInterface
 CMD_ID = f'{config.COMPANY_NAME}_lineBoring'
 CMD_NAME = 'Line Boring'
 CMD_Description = (
-    'Bore shelf-pin holes into a panel from a chosen rule (e.g. Emaar): evenly '
-    'spaced 3-hole sets in two columns, built live-parametric.'
+    'Bore shelf-pin holes into a panel from a chosen rule (e.g. Emaar): 3-hole sets '
+    'split evenly between the bottom and top panels, in two columns, built '
+    'live-parametric.'
 )
 IS_PROMOTED = True
 
@@ -60,6 +67,7 @@ ICON_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'resource
 # Input ids.
 FACES_ID = 'lb_faces'
 BACK_PANEL_ID = 'lb_back_panel'
+SPAN_ID = 'lb_span'
 FRONT_EDGE_ID = 'lb_front_edge'
 N_ID = 'lb_n'
 FRONT_ID = 'lb_front'
@@ -113,6 +121,14 @@ def command_created(args: adsk.core.CommandCreatedEventArgs):
     back_panel.addSelectionFilter('PlanarFaces')
     back_panel.setSelectionLimits(0, 1)
 
+    span = inputs.addSelectionInput(
+        SPAN_ID, 'Bottom / top panels',
+        'Pick the bottom panel\'s TOP face and the top panel\'s BOTTOM face — the '
+        'holes are split evenly between them; leave empty to use the side panel\'s '
+        'own ends')
+    span.addSelectionFilter('PlanarFaces')
+    span.setSelectionLimits(0, 2)
+
     front_edge = inputs.addSelectionInput(
         FRONT_EDGE_ID, 'Front edge (optional)',
         'Pick the panel\'s front edge for the front column to track; leave empty to auto-detect it')
@@ -152,15 +168,10 @@ def _read_params(inputs: adsk.core.CommandInputs) -> dict:
     }
 
 
-def _back_ref_world(inputs: adsk.core.CommandInputs):
-    """A world-space point ON the picked back panel's front face (or None). A point
-    on the face is enough: projected onto a side panel's depth axis it gives the
-    back panel's depth position, which both orients front/back and sets the back
-    column datum (so a recessed back is measured correctly)."""
-    sel = inputs.itemById(BACK_PANEL_ID)
-    if sel.selectionCount == 0:
-        return None
-    ent = sel.selection(0).entity
+def _face_world_point(ent):
+    """A world-space point ON a picked planar face. A point on the face is enough:
+    projected onto one of the side panel's axes it gives that face's position along
+    it, which is all these datums need."""
     try:
         return ent.centroid                      # BRepFace.centroid lies on the face
     except Exception:
@@ -169,6 +180,52 @@ def _back_ref_world(inputs: adsk.core.CommandInputs):
             (bb.minPoint.x + bb.maxPoint.x) / 2.0,
             (bb.minPoint.y + bb.maxPoint.y) / 2.0,
             (bb.minPoint.z + bb.maxPoint.z) / 2.0)
+
+
+def _back_ref_world(inputs: adsk.core.CommandInputs):
+    """A world-space point on the picked back panel's front face (or None) — the
+    datum the back hole column is measured forward of, so a recessed back is
+    measured correctly (it also orients front/back)."""
+    sel = inputs.itemById(BACK_PANEL_ID)
+    if sel.selectionCount == 0:
+        return None
+    return _face_world_point(sel.selection(0).entity)
+
+
+def _span_selection(inputs: adsk.core.CommandInputs):
+    """The picked bottom/top panel faces as ``[(face, world point), ...]`` (0-2, in
+    pick order — ordering along the panel happens in _span_ends)."""
+    sel = inputs.itemById(SPAN_ID)
+    return [(sel.selection(i).entity, _face_world_point(sel.selection(i).entity))
+            for i in range(sel.selectionCount)]
+
+
+def _span_native(panel_face, span_sel):
+    """``span_sel`` with its points mapped into ``panel_face``'s native space, for
+    the native-space frame used by validation and the explicit fallback."""
+    return [(face, _to_native_point(panel_face, pt)) for face, pt in span_sel]
+
+
+def _span_ends(fr, span_sel):
+    """Order the picked span faces along the side panel's height and return
+    ``(bottom, top)``, each ``(height offset, face, point)`` or None. One picked
+    face is taken as the bottom or the top by which half of the side panel it lies
+    in, so the other end falls back to the side panel's own edge."""
+    items = sorted(
+        ((fr.origin.vectorTo(pt).dotProduct(fr.height_dir), face, pt)
+         for face, pt in span_sel if pt is not None),
+        key=lambda item: item[0])   # key: BRepFace has no ordering for tie-breaks
+    if not items:
+        return None, None
+    if len(items) == 1:
+        return (items[0], None) if items[0][0] < fr.height / 2.0 else (None, items[0])
+    return items[0], items[-1]
+
+
+def _span_heights(fr, span_sel):
+    """``(bottom_h, top_h)`` height offsets for the rule; None where not picked."""
+    bottom, top = _span_ends(fr, span_sel)
+    return (bottom[0] if bottom else None, top[0] if top else None)
 
 
 def _to_native_point(face, world_pt):
@@ -229,6 +286,7 @@ def command_preview(args: adsk.core.CommandEventArgs):
         params = _read_params(inputs)
         rule = boring.RULES[0]
         bp_world = _back_ref_world(inputs)   # preview uses world-space proxy faces
+        span_sel = _span_selection(inputs)
 
         group = root.customGraphicsGroups.add()
         red = adsk.fusion.CustomGraphicsSolidColorEffect.create(adsk.core.Color.create(239, 68, 68, 255))
@@ -240,6 +298,7 @@ def command_preview(args: adsk.core.CommandEventArgs):
                 fr = boring.frame(face, back_ref_point=bp_world)
                 p = dict(params)
                 p['back_depth'] = _back_depth(fr, bp_world)   # preview is all world-space
+                p['bottom_h'], p['top_h'] = _span_heights(fr, span_sel)
                 pts = rule.preview_points(fr, p)
             except Exception:
                 continue
@@ -258,8 +317,12 @@ def command_preview(args: adsk.core.CommandEventArgs):
             line.color = red
             line.weight = 4
 
-            # Count label floated off the face centre; warn when orientation was guessed.
-            label = f'{len(pts)} holes'
+            # Count + opening label floated off the face centre; warn when orientation
+            # was guessed. The opening is what the sets are split between, so showing
+            # it makes a mis-picked top/bottom face obvious before OK.
+            b = p['bottom_h'] if p['bottom_h'] is not None else 0.0
+            t = p['top_h'] if p['top_h'] is not None else fr.height
+            label = f'{len(pts)} holes  |  {(t - b) / boring.MM:.0f} mm opening'
             if fr.ambiguous:
                 label += '  (orientation guessed — pick the back panel face)'
             label_pt = _translated(fr.point(fr.height / 2.0, fr.depth / 2.0), fr.normal, 1.0)
@@ -306,6 +369,7 @@ def command_execute(args: adsk.core.CommandEventArgs):
     back_proxy = back_input.selection(0).entity if back_input.selectionCount else None
     front_input: adsk.core.SelectionCommandInput = inputs.itemById(FRONT_EDGE_ID)
     front_edge = front_input.selection(0).entity if front_input.selectionCount else None
+    span_sel = _span_selection(inputs)           # [(face, world point)] for bottom/top
     rule = boring.RULES[0]
     params = _read_params(inputs)
     bp_world = _back_ref_world(inputs)           # world point on the back panel face
@@ -321,8 +385,10 @@ def command_execute(args: adsk.core.CommandEventArgs):
             fr_native = boring.frame(native, up=up, front_refs=front_refs, back_ref_point=bp_native)
             p_native = dict(params)
             p_native['back_depth'] = _back_depth(fr_native, bp_native)
+            p_native['bottom_h'], p_native['top_h'] = _span_heights(
+                fr_native, _span_native(face, span_sel))
             rule.validate(fr_native, p_native)   # raises ValueError with a message
-            _bore_one(comp, face, native, back_proxy, front_edge, bp_world, params)
+            _bore_one(comp, face, native, back_proxy, front_edge, bp_world, span_sel, params)
             bored += 1
         except ValueError as ve:
             ui.messageBox(str(ve), CMD_NAME)
@@ -368,13 +434,14 @@ def _set_bore_direction(hole_input, sketch, fr):
         pass
 
 
-def _bore_one(comp, proxy_face, native_face, back_proxy, front_edge, bp_world, params):
+def _bore_one(comp, proxy_face, native_face, back_proxy, front_edge, bp_world, span_sel, params):
     """Try the live-parametric build (associative datums + seed + height pattern); if
     any step throws, roll back the partial features and fall back to explicit holes
     on the native face, which always build correctly. Either way the panel is bored."""
     created = []
     try:
-        _build_parametric(comp, proxy_face, back_proxy, front_edge, bp_world, params, created)
+        _build_parametric(comp, proxy_face, back_proxy, front_edge, bp_world, span_sel,
+                          params, created)
     except Exception:
         for feat in reversed(created):
             try:
@@ -382,10 +449,10 @@ def _bore_one(comp, proxy_face, native_face, back_proxy, front_edge, bp_world, p
             except Exception:
                 pass
         futil.log(f'{CMD_NAME}: parametric build failed; using explicit holes', force_console=True)
-        _build_explicit(comp, proxy_face, native_face, bp_world, params)
+        _build_explicit(comp, proxy_face, native_face, bp_world, span_sel, params)
 
 
-def _build_explicit(comp, proxy_face, native_face, bp_world, params):
+def _build_explicit(comp, proxy_face, native_face, bp_world, span_sel, params):
     """Robust fallback: drill every computed centre with one HoleFeature at fixed
     positions on the native face — no pattern, no cross-component refs, so it always
     builds. Not reflow-on-edit (the parametric path provides that)."""
@@ -394,6 +461,7 @@ def _build_explicit(comp, proxy_face, native_face, bp_world, params):
     fr = boring.frame(native_face, up=up, front_refs=front_refs, back_ref_point=bp_native)
     p = dict(params)
     p['back_depth'] = _back_depth(fr, bp_native)
+    p['bottom_h'], p['top_h'] = _span_heights(fr, _span_native(proxy_face, span_sel))
     plan = boring.RULES[0].build_plan(fr, p)
 
     sketch = comp.sketches.add(native_face)
@@ -409,14 +477,17 @@ def _build_explicit(comp, proxy_face, native_face, bp_world, params):
     holes.add(hin)
 
 
-def _build_parametric(comp, proxy_face, back_proxy, front_edge, bp_world, params, created):
+def _build_parametric(comp, proxy_face, back_proxy, front_edge, bp_world, span_sel,
+                      params, created):
     """Live-parametric build, Shelf-Creator style: the sketch is created on the side
     panel face in ASSEMBLY context, so it can reference other components. Datums are
     real, associative geometry — the back column is dimensioned off the back-panel
     face INTERSECTED with the sketch plane, the front column off the (projected)
-    front edge, and heights off the (projected) bottom edge. A single height
-    rectangular pattern (qty N) replicates the seed set up the panel. So changing the
-    back-panel thickness or the panel depth moves the holes with the references."""
+    front edge, and heights off the BOTTOM PANEL's face (also intersected), with the
+    spacing driven by a reference dimension up to the TOP PANEL's face. A single
+    height rectangular pattern (qty N) replicates the seed set up the opening. So
+    changing a panel's thickness, or moving the bottom/top panels, moves and
+    redistributes the holes with the references."""
     if back_proxy is None:
         raise RuntimeError('Back panel face is required for the parametric build.')
 
@@ -424,6 +495,9 @@ def _build_parametric(comp, proxy_face, back_proxy, front_edge, bp_world, params
     fr = boring.frame(proxy_face, back_ref_point=bp_world)
     p = dict(params)
     p['back_depth'] = _back_depth(fr, bp_world)
+    bottom_ref, top_ref = _span_ends(fr, span_sel)
+    p['bottom_h'] = bottom_ref[0] if bottom_ref else None
+    p['top_h'] = top_ref[0] if top_ref else None
     plan = boring.RULES[0].build_plan(fr, p)
 
     design = adsk.fusion.Design.cast(app.activeProduct)
@@ -432,11 +506,31 @@ def _build_parametric(comp, proxy_face, back_proxy, front_edge, bp_world, params
     sketch = comp.sketches.add(proxy_face)
     created.append(sketch)
 
-    # Associative datums.
-    bottom_edge = _find_edge(proxy_face, fr, along=fr.depth_dir, minimize=fr.height_dir, min_len=fr.depth * 0.5)
-    if bottom_edge is None:
-        raise RuntimeError('Could not identify the panel bottom edge.')
-    bottom_line = _project_line(sketch, bottom_edge)
+    # Associative datums. The bottom datum is the picked bottom panel's face where it
+    # crosses this sketch plane (so the first set tracks that panel); with no bottom
+    # panel picked it falls back to the side panel's own bottom edge. A picked face
+    # that fails to intersect raises, which drops the whole panel to the explicit
+    # fallback rather than silently boring a different (panel-based) spacing.
+    if bottom_ref is not None:
+        bottom_line = _intersect_line(sketch, bottom_ref[1])
+        if bottom_line is None:
+            raise RuntimeError('The bottom panel face does not cross the side panel sketch plane.')
+    else:
+        bottom_edge = _find_edge(proxy_face, fr, along=fr.depth_dir, minimize=fr.height_dir,
+                                 min_len=fr.depth * 0.5)
+        if bottom_edge is None:
+            raise RuntimeError('Could not identify the panel bottom edge.')
+        bottom_line = _project_line(sketch, bottom_edge)
+
+    # Top datum: the picked top panel's face, else the side panel's own top edge.
+    if top_ref is not None:
+        top_line = _intersect_line(sketch, top_ref[1])
+        if top_line is None:
+            raise RuntimeError('The top panel face does not cross the side panel sketch plane.')
+    else:
+        top_edge = _find_edge(proxy_face, fr, along=fr.depth_dir, minimize=_neg(fr.height_dir),
+                              min_len=fr.depth * 0.5)
+        top_line = _project_line(sketch, top_edge) if top_edge is not None else None
 
     back_line = _intersect_line(sketch, back_proxy)   # where the back panel crosses this plane
     if back_line is None:
@@ -453,26 +547,29 @@ def _build_parametric(comp, proxy_face, back_proxy, front_edge, bp_world, params
 
     dims = sketch.sketchDimensions
 
-    # Live panel-height token: a DRIVEN reference dimension between the bottom and top
-    # edges measures the actual panel height, so spacing = H/(N+1) tracks it (incl. the
-    # user's own height parameter). Falls back to a baked number if it can't be made.
-    h_token = f'({plan["h_mm"]})'
-    try:
-        top_edge = _find_edge(proxy_face, fr, along=fr.depth_dir, minimize=_neg(fr.height_dir), min_len=fr.depth * 0.5)
-        if top_edge is not None:
-            top_line = _project_line(sketch, top_edge)
-            h_ref = dims.addOffsetDimension(bottom_line, top_line, sketch.modelToSketchSpace(fr.point(fr.height / 2.0, fr.depth / 2.0)), False)
+    # Live opening token: a DRIVEN reference dimension from the bottom datum to the
+    # top datum measures the CLEAR OPENING between the two panels, so spacing =
+    # opening/(N+1) tracks them — move a panel, change its thickness or drive it from
+    # the user's own parameters and the holes redistribute. Falls back to a baked
+    # number if the dimension can't be made.
+    h_token = f'({plan["span_mm"]})'
+    if top_line is not None:
+        try:
+            h_ref = dims.addOffsetDimension(
+                bottom_line, top_line,
+                sketch.modelToSketchSpace(fr.point(fr.height / 2.0, fr.depth / 2.0)), False)
             hp = h_ref.parameter
             # Give the auto-named (d###) reference dimension a clear, unique name +
-            # comment so it reads as "the panel height that drives the hole spacing".
+            # comment so it reads as "the opening that drives the hole spacing".
             try:
                 hp.name = _unique_param_name(design, _safe_name(f'{boring.PFX}H_{comp.name}'))
-                hp.comment = 'Line boring: measured panel height (drives shelf-pin spacing)'
+                hp.comment = ('Line boring: clear opening between the bottom and top '
+                              'panels (drives shelf-pin spacing)')
             except Exception:
                 pass
             h_token = hp.name
-    except Exception:
-        h_token = f'({plan["h_mm"]})'
+        except Exception:
+            h_token = f'({plan["span_mm"]})'
 
     spacing_expr = f'({h_token} / ({boring.PFX}N + 1))'
     height_exprs = {
@@ -481,7 +578,8 @@ def _build_parametric(comp, proxy_face, back_proxy, front_edge, bp_world, params
         'low': f'{spacing_expr} - {boring.PFX}pitch',
     }
 
-    # Seed = first set of BOTH columns; depth dimensioned to the matching datum.
+    # Seed = first set of BOTH columns; heights measured up from the bottom datum,
+    # depth dimensioned to the matching column datum.
     seed_points = []
     for item in plan['seed']:
         sp = sketch.sketchPoints.add(sketch.modelToSketchSpace(item['pt']))
@@ -507,9 +605,9 @@ def _build_parametric(comp, proxy_face, back_proxy, front_edge, bp_world, params
     hole_feat = holes.add(hin)
     created.append(hole_feat)
 
-    # Height pattern only: replicate the seed set up the panel (qty N, spacing
-    # H/(N+1) — the SAME live spacing_expr used for the seed, so the whole column
-    # redistributes when the panel height changes).
+    # Height pattern only: replicate the seed set up the opening (qty N, spacing
+    # opening/(N+1) — the SAME live spacing_expr used for the seed, so the whole
+    # column redistributes when the bottom/top panels move).
     pattern_ent = adsk.core.ObjectCollection.create()
     pattern_ent.add(hole_feat)
     patterns = comp.features.rectangularPatternFeatures

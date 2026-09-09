@@ -87,6 +87,7 @@ import adsk.core
 import adsk.fusion
 
 from . import configs
+from .. import config_table
 from .. import ui_helpers
 from .. import wc_attrs
 from ...lib import fusionAddInUtils as futil
@@ -113,8 +114,20 @@ ICON_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'resource
 HANDLE_ID = 'hd_handle'
 INFO_ID = 'hd_info'
 
-HANDLE_FOLDER_NAME = 'Handles'
-HANDLE_SKETCH_NAME = 'Handles'
+# The folder in the hardware project, and the sketch inside each cabinet that
+# carries the locator points. Both are alias lists rather than one name, tried in
+# preference order and matched with case, spacing and punctuation ignored — a
+# cabinet drawn with a sketch called "handles", "Handle" or "Handle Points" is
+# fitted like any other instead of being silently skipped. The first entry is
+# what these should be called, and what the user is told to look for.
+HANDLE_FOLDER_NAMES = ('Handles', 'Handle', 'Handles Library', 'Handle Library',
+                       'Hardware Handles', 'Pulls')
+HANDLE_SKETCH_NAMES = ('Handles', 'Handle', 'Handle Points', 'Handle Point',
+                       'Handles Sketch', 'Handle Sketch', 'Handle Locators',
+                       'Handle Positions', 'Handle Position')
+
+HANDLE_FOLDER_NAME = HANDLE_FOLDER_NAMES[0]
+HANDLE_SKETCH_NAME = HANDLE_SKETCH_NAMES[0]
 
 # Marks an occurrence as one this command placed, so a later run can find and remove
 # it. Read off the model would be guesswork — a kitchen legitimately contains other
@@ -310,13 +323,13 @@ def _handle_files():
         return []
     try:
         folders = project.rootFolder.dataFolders
-        folder = None
+        by_name = {}
         for i in range(folders.count):
-            if folders.item(i).name.strip().lower() == HANDLE_FOLDER_NAME.lower():
-                folder = folders.item(i)
-                break
-        if folder is None:
+            by_name.setdefault(folders.item(i).name, folders.item(i))
+        chosen = config_table.pick_name(list(by_name), HANDLE_FOLDER_NAMES)
+        if chosen is None:
             return []
+        folder = by_name[chosen]
         files = folder.dataFiles
         rows = []
         for i in range(files.count):
@@ -338,21 +351,31 @@ def _sketch_in_context(occurrence):
     createForAssemblyContext is the whole trick: the component's sketch is in the
     CABINET's coordinates, and a kitchen has the same cabinet component placed in
     several different spots. Reached through the occurrence, every point's
-    worldGeometry comes back where that particular cabinet actually stands."""
+    worldGeometry comes back where that particular cabinet actually stands.
+
+    Which sketch is the handles sketch is settled by HANDLE_SKETCH_NAMES rather
+    than by one exact name: the whole component is offered up at once so the
+    preferred name always wins where it exists, and an alias is only reached for
+    when it does not."""
     try:
         sketches = occurrence.component.sketches
     except Exception:
         return None
-    wanted = HANDLE_SKETCH_NAME.strip().lower()
+    by_name = {}
     for i in range(sketches.count):
         sketch = sketches.item(i)
-        if sketch.name.strip().lower() != wanted:
-            continue
         try:
-            return sketch.createForAssemblyContext(occurrence)
+            by_name.setdefault(sketch.name, sketch)
         except Exception:
-            return sketch
-    return None
+            continue
+    chosen = config_table.pick_name(list(by_name), HANDLE_SKETCH_NAMES)
+    if chosen is None:
+        return None
+    sketch = by_name[chosen]
+    try:
+        return sketch.createForAssemblyContext(occurrence)
+    except Exception:
+        return sketch
 
 
 def _cabinets_with_sketches(root):
@@ -1316,7 +1339,7 @@ def _fit_handles(label, data_file):
     cabinets = _cabinets_with_sketches(root)
     if not cabinets:
         ui.messageBox(f'No cabinet in this assembly has a sketch called '
-                      f'"{HANDLE_SKETCH_NAME}".\n\n'
+                      f'"{HANDLE_SKETCH_NAME}" (or anything reading as it).\n\n'
                       f'{removed} previously fitted handle(s) were removed.')
         return
 

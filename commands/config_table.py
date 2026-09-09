@@ -13,27 +13,26 @@
 # You should have received a copy of the GNU General Public License along with
 # this program.  If not, see <https://www.gnu.org/licenses/>.
 
-"""Reading and filling in a configured design's configuration table.
+"""Reading, naming and filling in a configured design's configuration table.
 
-Shared by the two commands that split the job in half, and by Fit Handles, which
-needs the same naming rules when it adds a row of its own:
+Shared by Create Configurations, and by Fit Handles, which needs the same naming
+rules when it adds a row of its own.
 
-    Create Configurations   works out every combination of the design's theme
-                            tables and adds a row for each one missing. Fast, and
-                            it changes nothing else.
-    Generate Configurations builds the geometry for rows that have none. Slow,
-                            and it must not run until the document has been
-                            SAVED — see build().
+Create Configurations does two things, both driven from here:
 
-They are separate buttons because doing both in one pass does not work: a row
-created moments ago is not ready to be built, and asking anyway gives
-"Select failed because Configuration was temporarily unavailable". Saving in
-between is what makes the rows real.
+    rename_plan / rename   bring the rows already in the table into line with the
+                           naming scheme below, so hand-made rows and generated
+                           ones read the same.
+    plan / create          work out every combination of the design's theme
+                           tables and add a row for each one missing.
+
+Neither builds geometry. Fusion builds a configuration when it is activated, and
+a row cannot be built until the document has been saved anyway, so the geometry
+is left to Fusion and to whoever opens the row.
 """
 
 import itertools
 import re
-import time
 
 import adsk.core
 import adsk.fusion
@@ -45,18 +44,107 @@ VARY = ()
 
 # Themes never varied and never named. Partition is decided by configuration
 # rules, and writing it through the API does not make those rules fire, so a row
-# inherits whatever its source row had.
+# inherits whatever its source row had. Matched loosely, like everything below.
 EXCLUDE = ('Partition',)
+
+
+# ---------------------------------------------------------------------------
+# Names, matched loosely
+# ---------------------------------------------------------------------------
+# Every name in a configured design is typed by hand, and hand-typed names
+# drift: "Handles", "handles", "Handle Type"; "Gola C Profile" in one library
+# and "Gola" in the next. So nothing here is compared as an exact string. A name
+# is reduced to its letters and digits, lower-cased, and the alias lists below
+# are tried in order until one answers. A library that spells it its own way
+# still resolves instead of the command reporting the theme as missing.
+#
+# The lists are in PREFERENCE order: the first entry is what a new library
+# should call the thing, and what the user is shown before any library has been
+# read; the rest are what is accepted when the first one is not there.
+
+# The theme column that says whether a cabinet is machined for a Gola profile.
+HANDLES_TITLES = ('Handles', 'Handle', 'Handle Type', 'Handle Style',
+                  'Handles Theme', 'Handle Theme', 'Handles Type', 'Handling')
+
+# Its Gola value. Any value carrying the word "gola" counts as one however it is
+# spelled, so this list only decides which to prefer when a theme offers several.
+GOLA_VALUES = ('Gola', 'Gola C Profile', 'Gola C', 'C Gola', 'Gola Profile',
+               'Gola C-Profile', 'Gola Channel', 'Gola Rail', 'Gola Handle')
+
+# Its hardware value — the state a cabinet must be in before a handle is fitted.
+HANDLE_VALUES = ('Handles', 'Handle', 'Other Handles', 'Other Handle',
+                 'Normal Handles', 'Standard Handles', 'Hardware Handles',
+                 'Hardware', 'Handle Hardware', 'No Gola', 'None')
+
+
+def normalized(text):
+    """A name reduced to its letters and digits, lower-cased.
+
+    Case, spaces, hyphens and underscores all stop mattering, which is most of
+    how these names differ from one library to the next."""
+    return re.sub(r'[^a-z0-9]+', '', str('' if text is None else text).lower())
+
+
+def same_name(one, other):
+    """Names differing only in case, spacing or punctuation. '' matches nothing."""
+    key = normalized(one)
+    return bool(key) and key == normalized(other)
+
+
+def pick_name(names, aliases, loose=True):
+    """The entry of `names` that best answers to one of `aliases`, or None.
+
+    Returned AS THE TABLE SPELLS IT — what gets written back has to be the
+    library's own name for the thing, never ours.
+
+    Matched in passes rather than alias by alias, so preference order actually
+    decides: every alias gets its exact chance before any gets a
+    case-insensitive one, and only when no alias matched either way is a partial
+    name accepted. That is what lets "Gola" find "Gola C Profile" without
+    letting it beat a column literally called "Gola". Pass loose=False where a
+    wrong guess would be worse than no match at all."""
+    names = [name for name in names if name is not None]
+    for alias in aliases:
+        for name in names:
+            if name == alias:
+                return name
+    for alias in aliases:
+        for name in names:
+            if same_name(name, alias):
+                return name
+    if not loose:
+        return None
+    for alias in aliases:
+        key = normalized(alias)
+        if len(key) < 4:        # too short to contain-match without false hits
+            continue
+        for name in names:
+            if key in normalized(name):
+                return name
+    return None
+
+
+def is_gola(value):
+    """Is this theme value a Gola profile rather than a piece of hardware?
+
+    The word decides, not the spelling: "Gola", "Gola C Profile", "GOLA-C" and
+    "C Gola" are all one."""
+    return 'gola' in normalized(value)
+
+
+def is_excluded(title):
+    """Is this theme one whose value is inherited rather than chosen?"""
+    return any(same_name(title, name) for name in EXCLUDE)
+
+
+def is_handles_theme(title):
+    """Is this theme column the one carrying the Gola / handles choice?"""
+    return any(same_name(title, name) for name in HANDLES_TITLES)
 
 # Row naming. None takes the document's own name as the prefix.
 PREFIX = None
 PART_NUMBER_FROM_NAME = False
 
-# Where the record of what has been built is kept, on the design itself. There is
-# no way to ask a row whether it has geometry, and generate() costs the same ten
-# seconds either way, so the commands keep their own note.
-BUILT_GROUP = 'WoodCraft'
-BUILT_KEY = 'generatedConfigurations'
 
 
 # ---------------------------------------------------------------------------
@@ -68,15 +156,19 @@ def digits(value):
 
 
 def name_part(title, value):
-    """One piece of a row name. '' leaves the theme out of the name entirely."""
-    if title == 'Width':
+    """One piece of a row name. '' leaves the theme out of the name entirely.
+
+    Titles are recognised loosely, so a library whose column reads "handle type"
+    is named by the same rules as one that reads "Handles" rather than falling
+    through to the generic branch and spelling the value out in row names."""
+    if same_name(title, 'Width'):
         return digits(value)
-    if title == 'Legs Height':
+    if same_name(title, 'Legs Height'):
         return 'L' + digits(value)
-    if title == 'Countertop Height':
+    if same_name(title, 'Countertop Height'):
         return 'C' + digits(value)
-    if title == 'Handles':
-        return 'Gola' if 'gola' in str(value).lower() else ''
+    if is_handles_theme(title):
+        return 'Gola' if is_gola(value) else ''
     return re.sub(r'[^A-Za-z0-9]+', '', str(value))
 
 
@@ -87,7 +179,7 @@ def row_name(prefix, combination, order):
     naming by it would claim a decision that was never made."""
     parts = [prefix] if prefix else []
     for title in order:
-        if title in EXCLUDE:
+        if is_excluded(title):
             continue
         piece = name_part(title, combination.get(title, ''))
         if piece:
@@ -161,7 +253,9 @@ class Plan:
     """What Create Configurations would do, worked out without doing any of it."""
 
     __slots__ = ('vary', 'axes', 'total', 'present', 'to_create', 'clashes',
-                 'untouched', 'base', 'prefix', 'error')
+                 'untouched', 'base', 'prefix', 'error',
+                 'rows', 'to_rename', 'named_right', 'rename_dupes',
+                 'unreadable')
 
     def __init__(self, error=None):
         self.vary = ()
@@ -174,10 +268,21 @@ class Plan:
         self.base = None
         self.prefix = ''
         self.error = error
+        # Rows already in the table.
+        self.rows = 0
+        self.to_rename = []      # [{'index': i, 'old': name, 'new': name}]
+        self.named_right = 0     # rows the scheme already agrees with
+        self.rename_dupes = []   # rows whose scheme name another row also wants
+        self.unreadable = []     # rows with a cell that could not be read
 
 
-def plan(design, document_name):
-    """Work out every missing combination. Reads only; changes nothing."""
+def plan(design, document_name, rename=True):
+    """Work out what to rename and what to create. Reads only; changes nothing.
+
+    `rename` says whether the rows already in the table will be brought into line
+    with the naming scheme first. It only affects the plan's view of which names
+    are taken — with renaming on, an old hand-typed name is about to be freed and
+    so cannot collide with a row about to be created."""
     table = top_table(design)
     if table is None:
         return Plan('This document has no configuration table. Open the '
@@ -185,13 +290,22 @@ def plan(design, document_name):
 
     columns = theme_columns(table)
     if VARY:
-        vary = tuple(VARY)
-        missing = [t for t in vary if t not in columns]
+        # A configured theme is matched loosely and then replaced by the table's
+        # own spelling of it, so everything downstream indexes `columns` with a
+        # title that is actually in there.
+        wanted, missing = [], []
+        for title in VARY:
+            found = pick_name(list(columns), (title,))
+            if found is None:
+                missing.append(title)
+            else:
+                wanted.append(found)
         if missing:
             return Plan('These themes are not columns in this table:\n  ' +
                         '\n  '.join(missing))
+        vary = tuple(wanted)
     else:
-        vary = tuple(t for t in columns if t not in EXCLUDE)
+        vary = tuple(t for t in columns if not is_excluded(t))
     if not vary:
         return Plan('Nothing to vary — every theme in this table is excluded.')
     if table.rows.count == 0:
@@ -209,12 +323,41 @@ def plan(design, document_name):
     inherited = combination_of(columns, result.base)
     result.untouched = {t: v for t, v in inherited.items() if t not in vary}
 
+    # The rows already in the table: which combinations they cover, and what the
+    # naming scheme would call each of them.
     existing, taken = {}, set()
+    result.rows = table.rows.count
+    wanted = {}
     for i in range(table.rows.count):
         row = table.rows.item(i)
-        taken.add(row.name)
         whole = combination_of(columns, row)
         existing[tuple(whole.get(t, '') for t in vary)] = row.name
+
+        # A cell that would not read leaves the row unnamed rather than named
+        # from a hole: '' is not a value, it is a failure to find one.
+        if any(not whole.get(t) for t in vary):
+            result.unreadable.append(row.name)
+            taken.add(row.name)
+            continue
+
+        scheme = row_name(result.prefix, whole, vary)
+        if scheme in wanted:
+            # Two rows carrying the same combination — a duplicate row, or two
+            # combinations the scheme spells the same way. Only the first takes
+            # the name; the rest keep theirs and are reported.
+            result.rename_dupes.append(row.name)
+            taken.add(row.name)
+            continue
+        wanted[scheme] = i
+        if row.name == scheme:
+            result.named_right += 1
+            taken.add(row.name)
+            continue
+        if rename:
+            result.to_rename.append({'index': i, 'old': row.name, 'new': scheme})
+            taken.add(scheme)
+        else:
+            taken.add(row.name)
 
     planned = set()
     for combination in combinations:
@@ -230,11 +373,62 @@ def plan(design, document_name):
     return result
 
 
+def rename(design, result):
+    """Rename every row the plan calls for. Returns (renamed, problems).
+
+    Run before create(), so the names the new rows want are free by the time
+    they are asked for.
+
+    Where a name is passing from one row to another, the row that currently
+    holds it is parked on a temporary name first. Fusion does not swap names for
+    you: ask for one that is taken and it appends "(1)", leaving two rows that
+    read almost alike."""
+    table = top_table(design)
+    if table is None or not result.to_rename:
+        return 0, []
+
+    moving = {item['index']: item['new'] for item in result.to_rename}
+    held = {}
+    for i in range(table.rows.count):
+        held[table.rows.item(i).name] = i
+
+    problems = []
+    blocked = set()
+    for item in result.to_rename:
+        owner = held.get(item['new'])
+        if owner is None or owner == item['index']:
+            continue
+        if owner not in moving:
+            # Someone who is staying put has the name — the plan should not have
+            # produced this, so say so rather than letting Fusion invent a "(1)".
+            problems.append(f"{item['old']}: \"{item['new']}\" is already taken "
+                            f"by a row that is staying as it is — left alone")
+            blocked.add(item['index'])
+            continue
+        try:
+            table.rows.item(owner).name = '_wc_rename_%d' % owner
+        except Exception as exc:
+            problems.append(f'{table.rows.item(owner).name}: {exc}')
+
+    renamed = 0
+    for item in result.to_rename:
+        if item['index'] in blocked:
+            continue
+        try:
+            table.rows.item(item['index']).name = item['new']
+            renamed += 1
+        except Exception as exc:
+            # e.g. "Rename is unavailable because the Configured Design is still
+            # being saved" while a cloud save is in flight.
+            problems.append(f"{item['old']}: {exc}")
+    return renamed, problems
+
+
 def create(design, result):
     """Add every row the plan calls for. Returns (made, problems).
 
     Nothing is built here and nothing is saved — creating a row is instant, and
-    the geometry is a separate button precisely because it is not."""
+    Fusion builds a configuration when it is activated."""
     table = top_table(design)
     columns = theme_columns(table)
     parts = property_columns(table)
@@ -259,82 +453,3 @@ def create(design, result):
         except Exception as exc:
             problems.append(f'{name}: {exc}')
     return made, problems
-
-
-# ---------------------------------------------------------------------------
-# Building the geometry
-# ---------------------------------------------------------------------------
-def built_record(design):
-    try:
-        attribute = design.attributes.itemByName(BUILT_GROUP, BUILT_KEY)
-        if attribute and attribute.value:
-            return set(attribute.value.split('\n'))
-    except Exception:
-        pass
-    return set()
-
-
-def remember_built(design, ids):
-    try:
-        design.attributes.add(BUILT_GROUP, BUILT_KEY, '\n'.join(sorted(ids)))
-    except Exception:
-        pass
-
-
-def unbuilt(design, regenerate=False):
-    """The rows with no geometry yet, in table order."""
-    table = top_table(design)
-    if table is None:
-        return []
-    done = set() if regenerate else built_record(design)
-    return [table.rows.item(i) for i in range(table.rows.count)
-            if table.rows.item(i).id not in done]
-
-
-def build(design, rows, log, timeout=180.0, regenerate=False):
-    """Build each row's geometry in turn. Returns (built, skipped, problems).
-
-    Sequential on purpose: generate() blocks until the work is done and hands
-    back a future that has already finished, so there is nothing to overlap.
-
-    The caller must have SAVED the document first. Building a row that was
-    created moments ago in an unsaved document fails with "Configuration was
-    temporarily unavailable" — the row is not real to Fusion until it is on the
-    server."""
-    done = set() if regenerate else built_record(design)
-    built, skipped, problems = 0, 0, []
-    total = len(rows)
-    for index, row in enumerate(rows, start=1):
-        name = row.name
-        if row.id in done:
-            skipped += 1
-            continue
-        started = time.perf_counter()
-        try:
-            future = row.generate()
-            if future is None:
-                problems.append(f'{name}: generation would not start')
-            elif not _settled(future, timeout):
-                problems.append(f'{name}: still building after {timeout:.0f} s, '
-                                f'moved on')
-            else:
-                built += 1
-                done.add(row.id)
-                # Written after every row, so an interrupted run keeps what it did.
-                remember_built(design, done)
-        except Exception as exc:
-            problems.append(f'{name}: {exc}')
-        log(f'  [{index}/{total}] {name} — {time.perf_counter() - started:.1f} s')
-    return built, skipped, problems
-
-
-def _settled(future, timeout):
-    started = time.perf_counter()
-    while time.perf_counter() - started < timeout:
-        try:
-            if future.state == 2:
-                return True
-        except Exception:
-            return False
-        adsk.doEvents()
-    return False

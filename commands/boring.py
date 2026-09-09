@@ -195,20 +195,28 @@ def frame(face, up=None, front_refs=None, back_ref_point=None) -> Frame:
 # ---------------------------------------------------------------------------
 # Rules
 # ---------------------------------------------------------------------------
-def set_centers(height: float, n: int):
-    """Emaar even-interior rule: N set centres dividing the height into N+1 equal
-    gaps. center_k = k * H/(N+1), k = 1..N (measured from the bottom edge)."""
-    spacing = height / (n + 1)
-    return [k * spacing for k in range(1, n + 1)]
+def set_centers(bottom: float, top: float, n: int):
+    """Emaar even-interior rule: N set centres dividing the CLEAR OPENING between
+    the bottom and top datums into N+1 equal gaps.
+
+    center_k = bottom + k * (top - bottom)/(N+1), k = 1..N. ``bottom``/``top`` are
+    height offsets from the side panel's bottom edge, so passing (0, H) reproduces
+    the old whole-panel behaviour."""
+    spacing = (top - bottom) / (n + 1)
+    return [bottom + k * spacing for k in range(1, n + 1)]
 
 
 class EmaarRule:
-    """3-hole sets (middle ± pitch), evenly spaced H/(N+1), in two columns.
+    """3-hole sets (middle ± pitch), evenly split between the bottom and top
+    panels, in two columns.
 
-    The set centres divide the panel height into N+1 equal gaps. Each set is three
-    holes on a vertical line: a middle hole at the centre, plus one ``pitch`` above
-    and one below. Two vertical columns sit ``front``/``back`` in from the panel's
-    front and back edges."""
+    The set centres divide the CLEAR OPENING into N+1 equal gaps: the opening runs
+    from the picked bottom panel's top face to the picked top panel's bottom face
+    (``p['bottom_h']`` / ``p['top_h']``, height offsets from the side panel's bottom
+    edge), falling back to the side panel's own ends when they aren't picked. Each
+    set is three holes on a vertical line: a middle hole at the centre, plus one
+    ``pitch`` above and one below. Two vertical columns sit ``front``/``back`` in
+    from the panel's front and back edges."""
 
     name = 'emaar'
     display = 'Emaar'
@@ -238,11 +246,28 @@ class EmaarRule:
         front_d = fr.depth - p['front']
         return back_d, front_d
 
+    # ---- vertical span (shared by preview + plan) ----
+    @staticmethod
+    def _span(fr: Frame, p: dict):
+        """Height offsets (from the side panel's bottom edge = frame origin) of the
+        two datums the hole sets are split between: the picked BOTTOM panel's top
+        face and the picked TOP panel's bottom face (``p['bottom_h']`` /
+        ``p['top_h']``). Either falls back to the side panel's own end when that
+        panel wasn't picked, which reproduces the old whole-panel spacing."""
+        bottom = p.get('bottom_h')
+        top = p.get('top_h')
+        if bottom is None:
+            bottom = 0.0
+        if top is None:
+            top = fr.height
+        return bottom, top
+
     # ---- numeric hole centres on the inner face (preview + build) ----
     def preview_points(self, fr: Frame, p: dict):
         pts = []
         back_d, front_d = self._column_depths(fr, p)
-        for c in set_centers(fr.height, int(p['n'])):
+        bottom_h, top_h = self._span(fr, p)
+        for c in set_centers(bottom_h, top_h, int(p['n'])):
             for h in (c - p['pitch'], c, c + p['pitch']):
                 for d in (back_d, front_d):
                     pts.append(fr.point(h, d))
@@ -266,13 +291,27 @@ class EmaarRule:
         if back_d < radius or front_d > fr.depth - radius:
             raise ValueError('A hole column falls within its own radius of the panel '
                              'edge — adjust the setbacks.')
-        spacing = fr.height / (n + 1)
-        # Margin from the panel end to the outermost satellite is (spacing - pitch),
-        # equal at top and bottom; it must clear the hole radius too.
+        bottom_h, top_h = self._span(fr, p)
+        span = top_h - bottom_h
+        if span <= EPS:
+            raise ValueError(
+                'The bottom and top panels do not enclose an opening on this side '
+                'panel — pick the bottom panel\'s TOP face and the top panel\'s '
+                'BOTTOM face.')
+        spacing = span / (n + 1)
+        # Margin from each end of the opening to the outermost satellite is
+        # (spacing - pitch), equal top and bottom; it must clear the hole radius too.
         if spacing - p['pitch'] <= radius:
             raise ValueError(
-                'Panel too short for this many shelves: the outer hole of the top or '
-                'bottom set would run off the panel end. Reduce the shelf count or pitch.')
+                f'Opening too short for this many shelves ({_mm(span):.0f} mm clear): '
+                'the outer hole of the top or bottom set would run into the panel it '
+                'sits against. Reduce the shelf count or pitch.')
+        lowest = bottom_h + spacing - p['pitch']
+        highest = top_h - spacing + p['pitch']
+        if lowest < radius or highest > fr.height - radius:
+            raise ValueError(
+                'The hole pattern runs off the end of the side panel — check the '
+                'faces picked for the bottom and top panels.')
         if fr.thickness > EPS and p['depth'] >= fr.thickness:
             raise ValueError(
                 f'Hole depth ({_mm(p["depth"]):.0f} mm) reaches through the panel '
@@ -290,12 +329,18 @@ class EmaarRule:
           column off the projected front edge — so the holes follow those references
           when the back panel thickness or panel depth changes. A single height
           rectangular pattern (qty N, spacing H/(N+1)) replicates the set up the
-          panel. Only H is baked numerically (panel-height change = re-run); the
+          panel. Heights are measured off the BOTTOM datum (the picked bottom
+          panel's top face, or the side panel's bottom edge) and the spacing is
+          driven by a live reference dimension across the opening, so moving or
+          re-sizing the bottom/top panels reflows the holes. Only the opening height
+          is baked numerically when that reference dimension can't be made; the
           knobs (N, pitch, dia, depth, front, back) are wc_lb_* user parameters.
           Each ``seed`` entry tags its column so the command picks the right datum.
         """
         n = int(p['n'])
         back_d, front_d = self._column_depths(fr, p)
+        bottom_h, top_h = self._span(fr, p)
+        span = top_h - bottom_h
 
         params = [
             (f'{PFX}N',     str(n),                      '',   'Line boring: shelves per column (sets)'),
@@ -309,8 +354,8 @@ class EmaarRule:
         # Seed = first set (k=1) of BOTH columns: 6 holes. Each tags its column (so
         # the command dimensions depth against the matching datum) and its height
         # variant ('mid'/'up'/'low'); the command builds the height expression from
-        # a live panel-height token, so spacing tracks the panel height.
-        c1 = fr.height / (n + 1)
+        # a live opening-height token, so spacing tracks the bottom/top panels.
+        c1 = bottom_h + span / (n + 1)
         pitch = p['pitch']
         seed = []
         for h_off, variant in ((c1 - pitch, 'low'), (c1, 'mid'), (c1 + pitch, 'up')):
@@ -327,7 +372,7 @@ class EmaarRule:
             'front_expr': f'{PFX}front',   # offset from the projected front edge
             'hole': (f'{PFX}dia', f'{PFX}depth'),
             'qty_expr': f'{PFX}N',
-            'h_mm': f'{_mm(fr.height):.4f} mm',   # baked fallback if no live height token
+            'span_mm': f'{_mm(span):.4f} mm',     # baked fallback if no live opening token
         }
 
 

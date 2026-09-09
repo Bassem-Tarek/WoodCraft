@@ -5,16 +5,19 @@ alternative to tools like JoinerCAD. It turns a simple "skeleton" body into
 parametric panel components, joins and machines them, and produces material‑aware
 cut lists with colour‑coded nesting diagrams — without the bloat or a subscription.
 
-> **Status:** active development. Seventeen commands across five toolbar panels
-> (modelling, hardware, kitchen, output and dev). Pure Python + the Fusion API —
+> **Status:** active development. Twenty commands across two toolbar tabs —
+> **WoodCraft** (modelling, hardware, kitchen, output, dev) and **Kitchen**
+> (per-job project management). Pure Python + the Fusion API —
 > **no external packages, no build step**.
 
 ---
 
 ## What's inside
 
-Everything lives in a dedicated **WoodCraft** tab in the **Design** workspace,
-split into panels that read as a workflow (design → hardware → output):
+Two tabs in the **Design** workspace. The **WoodCraft** tab holds everything that
+models or reports on cabinets, split into panels that read as a workflow
+(design → hardware → kitchen → output). The **Kitchen** tab holds the two
+per-job commands that manage cloud folders rather than geometry.
 
 ### Cabinet Builder (modelling)
 | Command | What it does |
@@ -44,6 +47,69 @@ the finish spec is a property of a whole kitchen, not of a cabinet being modelle
 |---|---|
 | **Countertop** | Builds the worktop over assembled cabinets. **The wall is the reference:** the slab's back edge lies on the picked wall face and its front edge is that face offset by the **cabinet depth + a 20 mm overhang** (editable). The **side panels supply only the two end lines** — where the run starts and stops along the wall, taken from their outer faces. The underside lands on the **top of the tallest selected side panel**, so you never measure the plinth + carcass height. Tick **Backsplash** for an upstand as well, with its own **thickness** and **height**: it runs the full length of each run, hard against the wall, standing on the worktop. A **live preview** draws every piece as a wireframe box (slab in cyan, upstand in amber) labelled with its run length, so you see it before you commit. One wall face = one run = one component with one body (`Countertop` / `Countertop 1..N`, plus `Backsplash N`), each tagged with its own **countertop** category — costed by area and edgebandable exactly like a panel, but kept **out of the cut list and the nest**, because a worktop is bought as a slab or a cut length rather than nested out of a stock sheet. **L‑ and U‑shaped kitchens in one go:** select every wall and every end panel — each run claims the panels standing in front of *its* wall, is **extended and then clipped to the other walls' planes** so it ends exactly where the walls meet — neither short of the corner nor through the wall — and where two runs still overlap the command finishes with a **Combine cut** (keeping the tool) so the corner is solid once, not twice. |
 | **Skirting** | Builds the **plinth** under an assembled kitchen — deliberately its own command, not part of Countertop: a worktop is referenced off the **wall behind** the cabinets, a plinth off the **cabinet fronts**. Pick the **front face** of each run (its plane is the front, its normal says which way the run faces), the **side panels of the end cabinets** (which set how far the run reaches and how high the carcass underside is), optionally an **island** selection for a block skirted all the way round, and optionally a **ground** face or plane (default Z = 0). Give a **thickness** and a **setback** — the toe recess — and each run gets a board from the floor to the underside of the carcass, set back from the fronts. **Corners are mitred:** the run lines are offset and intersected, so an L, a U and a closed island loop all fall out of one construction and the material at a corner is counted once rather than twice. A galley deliberately does *not* join up — parallel runs never meet. Runs longer than **3 m** are split into equal boards, each its own sub-component tagged as a WoodCraft panel so the cut list counts it as a real part. Output is one component per run (`Skirting`, `Skirting 2` …) holding one sub-component per board. |
+
+### Kitchen tab (per-job project management)
+A **separate tab**, because these three commands don't touch geometry at all: they
+create, name and clear the cloud folders for one customer's job. Between them they
+book-end the design.
+
+The shape on the cloud:
+
+```
+Clients/                              ← KITCHENS_PROJECT_NAME (project)
+└── Kitchens/                         ← KITCHENS_FOLDER_NAME
+    ├── Kitchen Template 1/           ← a spare, waiting
+    │   ├── Kitchen Template 1        ← hybrid design
+    │   └── Library/                  ← copy of Emaar Library / Kitchen Library
+    └── Al Rashid_Kitchen_2026-09-09/ ← a template New Kitchen has renamed
+        ├── Al Rashid_Kitchen_2026-09-09
+        └── Library/
+```
+
+| Command | What it does |
+|---|---|
+| **Create Kitchen Template** | Builds a spare: a folder **`Kitchen Template <n>`** under `Clients/Kitchens` holding a **`Library`** sub-folder — a full copy of the master cabinet library (`LIBRARY_PROJECT_NAME` / `LIBRARY_SOURCE_FOLDER`, default **Emaar Library / Kitchen Library**), sub-folders and all — plus a new **hybrid** design named after the folder, saved and closed. No customer is asked for, because there isn't one yet: **that is the point.** Copying a library is slow and network-bound, so templates get stocked in a quiet moment. Build several at once with the **How many** spinner. The number is the **lowest unused** one, not the highest plus one — templates are consumed by being renamed, so gaps open constantly and filling them keeps the numbers small. |
+| **New Kitchen** | Type the customer's name and you get `Clients/Kitchens/<Customer>_Kitchen_<date>` — a design of that name plus its own `Library` copy — opened ready to work in. Two routes to that same result, and the designer needn't care which: if a template is **waiting**, it renames it (folder *and* design), which is two metadata writes and therefore instant; if **nothing is waiting**, it builds the kitchen from scratch exactly as Create Kitchen Template would, straight under the customer's name. The fallback matters because "no templates available" is a dead end at the worst possible moment — a fresh install, or a busy week that drained the spares — so the dialog just says this one will take a few minutes and suggests stocking up afterwards. Both routes produce an identical folder with identical stamps, so nothing downstream can tell them apart. There's deliberately **no template picker**: templates are interchangeable, so choosing would be a question with no wrong answer. The literal "Kitchen" in the name marks the job type, so the Clients project can hold other kinds of project later without the names turning ambiguous. |
+| **Finish Kitchen** | Run it on the finished design: it clears every file in that kitchen's **`Library`** the design doesn't reference, and prunes the sub-folders that leaves empty — what survives is exactly the cabinets in this kitchen. **Used means referenced at any depth**, so a placed cabinet's own hardware is safe too. It lists everything it is about to delete *before* you press OK, and Fusion's own `deleteMe()` refuses any file still referenced or open — those are reported as **kept**, so even a wrong answer from the reference scan can't orphan a cabinet. Deleted files land in the project's deleted items and can be restored from the Data Panel. |
+
+> **Guards worth knowing about**
+>
+> - **Finish Kitchen refuses to run on an unassigned `Kitchen Template <n>`.** A
+>   fresh template references nothing, so "delete everything unused" would wipe
+>   the library copy that makes the template worth having. Run New Kitchen on it
+>   first.
+> - It also **requires the design to be saved**: the cloud works out what is
+>   referenced from the saved version, so a cabinet placed but not yet saved
+>   would look unused. If the design references *nothing at all*, the dialog says
+>   so in red before you commit.
+> - **The Library folder is found by ID, not by name.** Create Kitchen Template
+>   stamps the folder's id onto the design document, which is what makes the
+>   rename workflow safe — the folder *and* the design both change name between
+>   creation and Finish Kitchen, and an id doesn't care.
+> - **One builder, two callers.** `commands/kitchen_build.py` owns "make a kitchen
+>   folder"; Create Kitchen Template and New Kitchen's fallback both call it, so
+>   the two paths can't drift and a fallback-built kitchen is indistinguishable
+>   from a template-built one.
+> - **"Newest template" means newest by creation date, not highest number.**
+>   Numbers get reused as gaps open, so `Kitchen Template 2` can easily be newer
+>   than `3`. A spare whose Library came out empty (a copy cancelled part-way) is
+>   skipped while any stocked one exists.
+>
+> **A note on wording:** everything these commands show the user says *clear* and
+> *tidy*, never *delete* — a designer who is scared of a button won't press it,
+> and Finish Kitchen is what pays back the per-job library copy. It isn't spin:
+> what it clears goes to the project's deleted items and can be restored.
+>
+> **Changing the names** (they will change): constants at the top of
+> [`config.py`](config.py) — `KITCHENS_PROJECT_NAME`, `KITCHENS_FOLDER_NAME`
+> (empty = straight in the project root), `LIBRARY_PROJECT_NAME`,
+> `LIBRARY_SOURCE_FOLDER` (empty = copy the whole project),
+> `KITCHEN_LIBRARY_FOLDER_NAME`, `KITCHEN_TEMPLATE_PREFIX`,
+> `KITCHEN_NAME_PATTERN` (default `{customer}_Kitchen_{date}`) and
+> `KITCHEN_DATE_FORMAT` (default `%Y-%m-%d`, which sorts chronologically in the
+> Data Panel; empty drops the date, and the dangling separator with it). Both dialogs show a
+> **red cross** beside anything they can't find and list the projects they *can*
+> see, so a renamed project is obvious before any work starts.
 
 ### Output (production)
 | Command | What it does |
@@ -172,11 +238,18 @@ WoodCraft/
 ├── WoodCraft.py                # add-in entry point (run / stop)
 ├── WoodCraft.manifest          # Fusion add-in manifest
 ├── AddInIcon.svg               # add-in icon
-├── config.py                   # shared ids, panel names, DEBUG, hardware project name,
+├── config.py                   # shared ids, tab/panel names, DEBUG, hardware project name,
+│                               #   kitchen project/folder + library names, template prefix,
 │                               #   attribute schema
 ├── commands/
 │   ├── __init__.py             # registers every command (start/stop, per-command error isolation)
 │   ├── ui_helpers.py           # shared tab/panel creation, teardown, panel tagging
+│   ├── kitchen_build.py        # builds one kitchen folder (folder + Library copy + hybrid
+│   │                           #   design) — shared by Create Kitchen Template and New
+│   │                           #   Kitchen's from-scratch fallback
+│   ├── kitchen_data.py         # cloud-data plumbing for the Kitchen tab: find project/folder,
+│   │                           #   recursive copy, template numbering, rename, reference scan,
+│   │                           #   delete + prune (no geometry)
 │   ├── wc_attrs.py             # component attribute store (category, cost, purchase mode,
 │   │                           #   edgeband, carcass/door finish type)
 │   ├── panels.py               # shared panel collector, material reading, assembly tree
@@ -200,6 +273,9 @@ WoodCraft/
 │   ├── cutList/                # Cut List & Nest
 │   ├── bom/                    # BOM palette: entry.py + resources/html/{index,style,main}
 │   ├── settings/               # Add-on settings dialog
+│   ├── createKitchenTemplate/  # Kitchen TAB: stock a spare kitchen + library copy
+│   ├── newKitchen/             # Kitchen TAB: rename a template into a customer job
+│   ├── finishKitchen/          # Kitchen TAB: clear the unused library copy
 │   └── inspectPanels/          # Dev tool (removable)
 ├── lib/fusionAddInUtils/       # Autodesk template helpers (logging, event wiring)
 └── docs/UI_GUIDE.md            # icon / UI guide for design work

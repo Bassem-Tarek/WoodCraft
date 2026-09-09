@@ -10,9 +10,13 @@ finds and removes UI elements.
 
 ## 1. Where the UI lives
 
-WoodCraft adds a dedicated tab to Fusion's **Design** workspace. Everything is
-built at runtime from Python; there is no static UI definition file. The tab is
-split into five panels (the gap between panels reads as a workflow separator):
+WoodCraft adds **two** tabs to Fusion's **Design** workspace. Everything is built
+at runtime from Python; there is no static UI definition file.
+
+The **WoodCraft** tab is split into five panels (the gap between panels reads as a
+workflow separator). The **Kitchen** tab is separate because its commands manage
+cloud folders for a job rather than geometry — a designer starting a kitchen
+shouldn't have to scroll past twenty modelling buttons to find the one they want.
 
 Every id below is built from `config.COMPANY_NAME` — never hard-code the prefix.
 
@@ -42,6 +46,30 @@ Design workspace (FusionSolidEnvironment)
     │   └── Settings         (button)      id = WoodCraft_settings   (not promoted)
     └── Panel: "Dev"                       id = WoodCraft_dev_panel
         └── Inspect Panels   (button)      id = WoodCraft_inspectPanels   (removable)
+
+Design workspace (FusionSolidEnvironment)
+└── Tab: "Kitchen"                         id = WoodCraft_kitchen_tab
+    └── Panel: "Kitchen Project"           id = WoodCraft_kitchen_project_panel
+        ├── Create Kitchen Template        id = WoodCraft_createKitchenTemplate
+        ├── New Kitchen      (button)      id = WoodCraft_newKitchen
+        └── Finish Kitchen   (button)      id = WoodCraft_finishKitchen
+```
+
+> ⚠️ **"Kitchen" names two different things — don't merge them.**
+> `WoodCraft_kitchen_panel` is a panel of whole-kitchen **modelling** commands
+> inside the WoodCraft tab (Countertop, Skirting, Set Finish). `WoodCraft_kitchen_tab`
+> is the separate **job-management** tab above. Both sets of constants live in
+> `config.py` under their own headings.
+
+`ui_helpers.get_panel()` and `remove_command()` both take an optional `tab_id`
+(and `tab_name`) that defaults to the WoodCraft tab — a command only names a tab
+when it wants a different one:
+
+```python
+panel = ui_helpers.get_panel(PANEL_ID, PANEL_NAME, tab_id=TAB_ID, tab_name=TAB_NAME)
+...
+ui_helpers.remove_command(PANEL_ID, CMD_ID, tab_id=TAB_ID)   # same tab_id, or the
+                                                             # button never goes away
 ```
 
 All panel IDs/names are defined in [`config.py`](../config.py); each command's
@@ -99,6 +127,9 @@ take, point `ICON_FOLDER` at a path Fusion has never read (e.g. a
 | BOM              | `bom/`                             | `WoodCraft_bom`        |
 | Settings         | `settings/`                        | `WoodCraft_settings`   |
 | Inspect Panels   | `inspectPanels/`                   | `WoodCraft_inspectPanels` |
+| Create Kitchen Template | `createKitchenTemplate/`    | `WoodCraft_createKitchenTemplate` |
+| New Kitchen      | `newKitchen/`                      | `WoodCraft_newKitchen` |
+| Finish Kitchen   | `finishKitchen/`                   | `WoodCraft_finishKitchen` |
 
 > The folder name is internal; the display name comes from `CMD_NAME` in each
 > `entry.py`. If you find stray icon-only folders named after display names (e.g.
@@ -133,6 +164,24 @@ edge. Draw oversize (8×) and downsample with LANCZOS so 16 px stays legible.
 > composition to the frame, so editing the shapes can't leave the artwork small
 > or off-centre.
 > Icon: **Countertop** = grey carcass + yellow slab + yellow upstand.
+>
+> The **Kitchen tab** trio comes from `generate_icons_kitchen_tab.py` — dev-only
+> and `.gitignore`d like the others. They follow the **flat, front-on** convention
+> and deliberately share one artwork: a WoodCraft-yellow folder with a keylined
+> white badge bottom-right. Only the badge differs, and it tracks the workflow in
+> **both glyph and colour** so the three stay apart at 16 px, where shape alone
+> blurs:
+>
+> | Command | Badge |
+> |---|---|
+> | Create Kitchen Template | dark `#555555` **+** — stock a spare |
+> | New Kitchen | orange `#F47426` **pencil** — name it for a customer |
+> | Finish Kitchen | green `#1A7F37` **tick** — the kitchen is done |
+>
+> Finish Kitchen deliberately does **not** get a red ✕. It tidies a finished job,
+> and a red ✕ reads as *destroy* — which makes designers avoid the one button that
+> pays back the whole per-job library copy. Same reason its tooltip and dialog say
+> "clear" and "tidy" rather than "delete". If you redraw one, redraw all three.
 
 There is also a top-level [`AddInIcon.svg`](../AddInIcon.svg) (referenced by
 `WoodCraft.manifest`) used as the add-in's icon in the Scripts & Add-Ins dialog.
