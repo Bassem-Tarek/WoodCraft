@@ -22,9 +22,11 @@ geometry and the rule catalogue live in commands/boring.py; this file is just th
 Fusion command around them.
 
 The default rule is **Emaar**: three-hole sets (a middle hole plus one a pitch
-above and below), the set centres dividing the CLEAR OPENING between the bottom
-and top panels into N+1 equal gaps, in two columns set in from the front and back
-edges. Leave the top/bottom selection empty and the side panel's own ends are used
+above and below) in two columns set in from the front and back edges. The sets are
+placed so the SHELF FACES divide the clear opening between the bottom and top
+panels into N+1 equal gaps — shelf thickness and the pin rise (a shelf rests on the
+pin, so it sits above the hole centre) are taken out of the arithmetic first, which
+is what makes the gap under the first shelf match the gap over the last one. Leave the top/bottom selection empty and the side panel's own ends are used
 instead (the old whole-panel behaviour).
 
 Live-parametric build: the command creates wc_lb_* user parameters and a feature
@@ -74,6 +76,8 @@ FRONT_ID = 'lb_front'
 BACK_ID = 'lb_back'
 PITCH_ID = 'lb_pitch'
 DIA_ID = 'lb_dia'
+SHELF_ID = 'lb_shelf'
+RISE_ID = 'lb_rise'
 DEPTH_ID = 'lb_depth'
 
 PREVIEW_SEG_CM = 0.4   # length of each preview "drill mark" along the bore direction
@@ -147,6 +151,10 @@ def command_created(args: adsk.core.CommandCreatedEventArgs):
                          adsk.core.ValueInput.createByReal(defaults['dia']))
     inputs.addValueInput(DEPTH_ID, 'Hole depth', length_units,
                          adsk.core.ValueInput.createByReal(defaults['depth']))
+    inputs.addValueInput(SHELF_ID, 'Shelf thickness', length_units,
+                         adsk.core.ValueInput.createByReal(defaults['shelf']))
+    inputs.addValueInput(RISE_ID, 'Pin rise', length_units,
+                         adsk.core.ValueInput.createByReal(defaults['rise']))
 
     futil.add_handler(args.command.execute, command_execute, local_handlers=local_handlers)
     futil.add_handler(args.command.executePreview, command_preview, local_handlers=local_handlers)
@@ -165,6 +173,8 @@ def _read_params(inputs: adsk.core.CommandInputs) -> dict:
         'pitch': inputs.itemById(PITCH_ID).value,
         'dia': inputs.itemById(DIA_ID).value,
         'depth': inputs.itemById(DEPTH_ID).value,
+        'shelf': inputs.itemById(SHELF_ID).value,
+        'rise': inputs.itemById(RISE_ID).value,
     }
 
 
@@ -322,7 +332,9 @@ def command_preview(args: adsk.core.CommandEventArgs):
             # it makes a mis-picked top/bottom face obvious before OK.
             b = p['bottom_h'] if p['bottom_h'] is not None else 0.0
             t = p['top_h'] if p['top_h'] is not None else fr.height
-            label = f'{len(pts)} holes  |  {(t - b) / boring.MM:.0f} mm opening'
+            gap = boring.clear_gap(b, t, int(p['n']), p['shelf'])
+            label = (f'{len(pts)} holes  |  {(t - b) / boring.MM:.0f} mm opening  |  '
+                     f'{int(p["n"]) + 1} x {gap / boring.MM:.1f} mm clear')
             if fr.ambiguous:
                 label += '  (orientation guessed — pick the back panel face)'
             label_pt = _translated(fr.point(fr.height / 2.0, fr.depth / 2.0), fr.normal, 1.0)
@@ -349,9 +361,10 @@ def command_validate_input(args: adsk.core.ValidateInputsEventArgs):
                 and inputs.itemById(DEPTH_ID).value > 0
                 and inputs.itemById(PITCH_ID).value > 0)
     setbacks_ok = inputs.itemById(FRONT_ID).value >= 0 and inputs.itemById(BACK_ID).value >= 0
+    shelf_ok = inputs.itemById(SHELF_ID).value >= 0 and inputs.itemById(RISE_ID).value >= 0
     # Per-panel geometry checks (depth/height-dependent) stay in EmaarRule.validate,
     # surfaced as a messageBox on OK; here we only gate the cheap, panel-independent ones.
-    args.areInputsValid = faces_ok and n_ok and sizes_ok and setbacks_ok
+    args.areInputsValid = faces_ok and n_ok and sizes_ok and setbacks_ok and shelf_ok
 
 
 # ---------------------------------------------------------------------------
@@ -571,11 +584,18 @@ def _build_parametric(comp, proxy_face, back_proxy, front_edge, bp_world, span_s
         except Exception:
             h_token = f'({plan["span_mm"]})'
 
-    spacing_expr = f'({h_token} / ({boring.PFX}N + 1))'
+    # The clear gap left once the shelves themselves are taken out of the opening:
+    # gap = (opening - N * shelf) / (N + 1). The first set sits a gap up from the
+    # bottom datum MINUS the pin rise, because the shelf lands above its hole centre;
+    # each following set is one gap plus one shelf higher. Every expression is live,
+    # so changing the shelf thickness or the opening reflows the whole column.
+    gap_expr = f'(({h_token} - {boring.PFX}N * {boring.PFX}shelf) / ({boring.PFX}N + 1))'
+    first_expr = f'({gap_expr} - {boring.PFX}rise)'
+    step_expr = f'({gap_expr} + {boring.PFX}shelf)'
     height_exprs = {
-        'mid': spacing_expr,
-        'up': f'{spacing_expr} + {boring.PFX}pitch',
-        'low': f'{spacing_expr} - {boring.PFX}pitch',
+        'mid': first_expr,
+        'up': f'{first_expr} + {boring.PFX}pitch',
+        'low': f'{first_expr} - {boring.PFX}pitch',
     }
 
     # Seed = first set of BOTH columns; heights measured up from the bottom datum,
@@ -606,15 +626,16 @@ def _build_parametric(comp, proxy_face, back_proxy, front_edge, bp_world, span_s
     created.append(hole_feat)
 
     # Height pattern only: replicate the seed set up the opening (qty N, spacing
-    # opening/(N+1) — the SAME live spacing_expr used for the seed, so the whole
-    # column redistributes when the bottom/top panels move).
+    # gap + shelf — one clear gap plus the shelf that sits in it, from the SAME live
+    # expressions used for the seed, so the whole column redistributes when the
+    # bottom/top panels move or the shelf thickness changes).
     pattern_ent = adsk.core.ObjectCollection.create()
     pattern_ent.add(hole_feat)
     patterns = comp.features.rectangularPatternFeatures
     pin = patterns.createInput(
         pattern_ent, up_line,
         adsk.core.ValueInput.createByString(plan['qty_expr']),
-        adsk.core.ValueInput.createByString(spacing_expr),
+        adsk.core.ValueInput.createByString(step_expr),
         adsk.fusion.PatternDistanceType.SpacingPatternDistanceType)
     pattern_feat = patterns.add(pin)
     created.append(pattern_feat)

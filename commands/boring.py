@@ -195,28 +195,51 @@ def frame(face, up=None, front_refs=None, back_ref_point=None) -> Frame:
 # ---------------------------------------------------------------------------
 # Rules
 # ---------------------------------------------------------------------------
-def set_centers(bottom: float, top: float, n: int):
-    """Emaar even-interior rule: N set centres dividing the CLEAR OPENING between
-    the bottom and top datums into N+1 equal gaps.
+def clear_gap(bottom: float, top: float, n: int, shelf: float = 0.0) -> float:
+    """The equal CLEAR gap between consecutive shelf FACES.
 
-    center_k = bottom + k * (top - bottom)/(N+1), k = 1..N. ``bottom``/``top`` are
-    height offsets from the side panel's bottom edge, so passing (0, H) reproduces
-    the old whole-panel behaviour."""
-    spacing = (top - bottom) / (n + 1)
-    return [bottom + k * spacing for k in range(1, n + 1)]
+    The opening holds N shelves of thickness ``shelf`` plus N+1 clear gaps, so
+    gap = (opening - N * shelf) / (N + 1). With shelf = 0 this is the old
+    centre-to-centre spacing."""
+    return (top - bottom - n * shelf) / (n + 1)
+
+
+def set_centers(bottom: float, top: float, n: int, shelf: float = 0.0, rise: float = 0.0):
+    """Emaar even-interior rule: N set centres placed so the shelf FACES divide the
+    clear opening into N+1 equal gaps.
+
+    A shelf does not sit at its hole centre — it rests on the pin, so its underside
+    lands ``rise`` above the centre (``rise`` = the pin's supporting height above the
+    hole axis, half the hole diameter for a plain shelf pin) and its top face
+    ``shelf`` higher again. Spacing the CENTRES evenly therefore leaves the bottom
+    gap larger than the top one by exactly (rise + shelf). Spacing the FACES evenly
+    instead gives, with g = clear_gap():
+
+        centre_1   = bottom + g - rise          (shelf underside lands at bottom + g)
+        centre_k+1 = centre_k + g + shelf       (a gap plus the shelf it sits under)
+
+    so every gap — bottom panel to first shelf, shelf to shelf, last shelf to top
+    panel — measures g. ``bottom``/``top`` are height offsets from the side panel's
+    bottom edge; shelf = rise = 0 reproduces the old evenly-spaced-centres rule."""
+    gap = clear_gap(bottom, top, n, shelf)
+    first = bottom + gap - rise
+    return [first + k * (gap + shelf) for k in range(n)]
 
 
 class EmaarRule:
     """3-hole sets (middle ± pitch), evenly split between the bottom and top
     panels, in two columns.
 
-    The set centres divide the CLEAR OPENING into N+1 equal gaps: the opening runs
+    The SHELF FACES divide the clear opening into N+1 equal gaps: the opening runs
     from the picked bottom panel's top face to the picked top panel's bottom face
     (``p['bottom_h']`` / ``p['top_h']``, height offsets from the side panel's bottom
-    edge), falling back to the side panel's own ends when they aren't picked. Each
-    set is three holes on a vertical line: a middle hole at the centre, plus one
-    ``pitch`` above and one below. Two vertical columns sit ``front``/``back`` in
-    from the panel's front and back edges."""
+    edge), falling back to the side panel's own ends when they aren't picked. Shelf
+    thickness (``p['shelf']``) and the pin rise (``p['rise']``, how far the shelf's
+    underside sits above the hole centre) are taken out of the arithmetic, so the
+    usable gaps come out equal rather than the hole centres — see set_centers().
+    Each set is three holes on a vertical line: a middle hole at the nominal centre,
+    plus one ``pitch`` above and one below. Two vertical columns sit ``front``/
+    ``back`` in from the panel's front and back edges."""
 
     name = 'emaar'
     display = 'Emaar'
@@ -229,6 +252,9 @@ class EmaarRule:
         'pitch': 3.2,      # 32 mm System-32 pitch
         'dia': 0.5,        # 5 mm pin hole
         'depth': 1.2,      # 12 mm blind depth
+        'shelf': 1.8,      # 18 mm shelf
+        'rise': 0.5,       # 5 mm — measured off the Emaar 19557 shelf mount
+                           #   (shelf underside 1115.5 mm over a 1110.5 mm hole centre)
     }
 
     # ---- column geometry (shared by preview + plan) ----
@@ -267,7 +293,8 @@ class EmaarRule:
         pts = []
         back_d, front_d = self._column_depths(fr, p)
         bottom_h, top_h = self._span(fr, p)
-        for c in set_centers(bottom_h, top_h, int(p['n'])):
+        for c in set_centers(bottom_h, top_h, int(p['n']),
+                             p.get('shelf', 0.0), p.get('rise', 0.0)):
             for h in (c - p['pitch'], c, c + p['pitch']):
                 for d in (back_d, front_d):
                     pts.append(fr.point(h, d))
@@ -282,6 +309,8 @@ class EmaarRule:
             raise ValueError('Pitch, hole diameter and hole depth must all be positive.')
         if p['front'] < 0 or p['back'] < 0:
             raise ValueError('Setbacks cannot be negative.')
+        if p.get('shelf', 0.0) < 0 or p.get('rise', 0.0) < 0:
+            raise ValueError('Shelf thickness and pin rise cannot be negative.')
         radius = p['dia'] / 2.0
         back_d, front_d = self._column_depths(fr, p)
         if front_d - back_d < p['dia']:
@@ -298,16 +327,29 @@ class EmaarRule:
                 'The bottom and top panels do not enclose an opening on this side '
                 'panel — pick the bottom panel\'s TOP face and the top panel\'s '
                 'BOTTOM face.')
-        spacing = span / (n + 1)
-        # Margin from each end of the opening to the outermost satellite is
-        # (spacing - pitch), equal top and bottom; it must clear the hole radius too.
-        if spacing - p['pitch'] <= radius:
+        shelf = p.get('shelf', 0.0)
+        rise = p.get('rise', 0.0)
+        gap = clear_gap(bottom_h, top_h, n, shelf)
+        if gap <= 0:
             raise ValueError(
-                f'Opening too short for this many shelves ({_mm(span):.0f} mm clear): '
-                'the outer hole of the top or bottom set would run into the panel it '
-                'sits against. Reduce the shelf count or pitch.')
-        lowest = bottom_h + spacing - p['pitch']
-        highest = top_h - spacing + p['pitch']
+                f'{n} shelves of {_mm(shelf):.0f} mm leave no room in a '
+                f'{_mm(span):.0f} mm opening. Reduce the shelf count or thickness.')
+        centers = set_centers(bottom_h, top_h, n, shelf, rise)
+        # The outermost satellite of the bottom set sits (centre_1 - pitch) up from
+        # the opening's floor, and of the top set (pitch) above centre_N; both must
+        # clear their panel by a hole radius.
+        if (centers[0] - p['pitch']) - bottom_h <= radius:
+            raise ValueError(
+                f'Opening too short for this many shelves ({_mm(gap):.0f} mm clear per '
+                'gap): the bottom set\'s lowest hole would run into the bottom panel. '
+                'Reduce the shelf count or pitch.')
+        if top_h - (centers[-1] + p['pitch']) <= radius:
+            raise ValueError(
+                f'Opening too short for this many shelves ({_mm(gap):.0f} mm clear per '
+                'gap): the top set\'s highest hole would run into the top panel. '
+                'Reduce the shelf count or pitch.')
+        lowest = centers[0] - p['pitch']
+        highest = centers[-1] + p['pitch']
         if lowest < radius or highest > fr.height - radius:
             raise ValueError(
                 'The hole pattern runs off the end of the side panel — check the '
@@ -341,6 +383,8 @@ class EmaarRule:
         back_d, front_d = self._column_depths(fr, p)
         bottom_h, top_h = self._span(fr, p)
         span = top_h - bottom_h
+        shelf = p.get('shelf', 0.0)
+        rise = p.get('rise', 0.0)
 
         params = [
             (f'{PFX}N',     str(n),                      '',   'Line boring: shelves per column (sets)'),
@@ -349,13 +393,15 @@ class EmaarRule:
             (f'{PFX}depth', f'{_mm(p["depth"]):.4f} mm', 'mm', 'Line boring: blind hole depth'),
             (f'{PFX}front', f'{_mm(p["front"]):.4f} mm', 'mm', 'Line boring: front-edge setback'),
             (f'{PFX}back',  f'{_mm(p["back"]):.4f} mm',  'mm', 'Line boring: back-panel setback'),
+            (f'{PFX}shelf', f'{_mm(shelf):.4f} mm',       'mm', 'Line boring: shelf thickness (taken out of the gaps)'),
+            (f'{PFX}rise',  f'{_mm(rise):.4f} mm',        'mm', 'Line boring: shelf underside above the hole centre (pin rise)'),
         ]
 
         # Seed = first set (k=1) of BOTH columns: 6 holes. Each tags its column (so
         # the command dimensions depth against the matching datum) and its height
         # variant ('mid'/'up'/'low'); the command builds the height expression from
         # a live opening-height token, so spacing tracks the bottom/top panels.
-        c1 = bottom_h + span / (n + 1)
+        c1 = set_centers(bottom_h, top_h, n, shelf, rise)[0]
         pitch = p['pitch']
         seed = []
         for h_off, variant in ((c1 - pitch, 'low'), (c1, 'mid'), (c1 + pitch, 'up')):
@@ -373,6 +419,7 @@ class EmaarRule:
             'hole': (f'{PFX}dia', f'{PFX}depth'),
             'qty_expr': f'{PFX}N',
             'span_mm': f'{_mm(span):.4f} mm',     # baked fallback if no live opening token
+            'gap_cm': clear_gap(bottom_h, top_h, n, shelf),   # equal clear gap (preview label)
         }
 
 
