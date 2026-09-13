@@ -247,9 +247,9 @@ class EmaarRule:
     # Defaults in centimetres (authored as the mm values the trade uses).
     DEFAULTS = {
         'n': 4,
-        'front': 3.7,      # 37 mm in from the front edge
-        'back': 3.7,       # 37 mm in from the back edge
-        'pitch': 3.2,      # 32 mm System-32 pitch
+        'front': 10.75,      # 107.5 mm in from the front edge
+        'back': 8.25,       # 82.5 mm in from the back edge
+        'pitch': 6.4,      # 64 mm System-32 pitch
         'dia': 0.5,        # 5 mm pin hole
         'depth': 1.2,      # 12 mm blind depth
         'shelf': 1.8,      # 18 mm shelf
