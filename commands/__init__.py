@@ -38,6 +38,7 @@ from .handles import entry as handles
 from .appearanceConfig import entry as appearanceConfig
 from .sheets import entry as sheets
 from .cutList import entry as cutList
+from .fccExport import entry as fccExport
 from .bom import entry as bom
 from .settings import entry as settings
 from .createKitchenTemplate import entry as createKitchenTemplate  # Kitchen tab
@@ -67,6 +68,7 @@ commands = [
     appearanceConfig,
     sheets,
     cutList,
+    fccExport,
     bom,
     settings,
     # Kitchen tab (its own ribbon tab — cloud folders, not geometry). Listed

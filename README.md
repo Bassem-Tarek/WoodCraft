@@ -116,6 +116,7 @@ Clients/                              ← KITCHENS_PROJECT_NAME (project)
 |---|---|
 | **Sheets** | A docked **HTML palette** that edits a global stock‑sheet **library** modelled on Fusion's Nesting *Process Material Library*: **Material → Sheets**. Each material has a name (matching the Fusion material), thickness, category and a display **colour**; each sheet has a size, cost and nesting params (rotation, item separation, edge trim). Save / **Export** / **Import** for sharing. |
 | **Cut List & Nest** | Collects all panels, groups them by **(material, thickness)**, matches each group to the Sheets library, and opens a **colour‑coded HTML report**: cut‑list table, per‑sheet **guillotine nesting** diagrams, sheet count, yield, optional cost, a **purchased‑items** list (your hardware + costs), and a printable label sheet. Pick one or more assemblies (or the whole design), and choose which stock sheet to nest on when a material has several. |
+| **FCC Export** | Nests the design's panels exactly as Cut List does, then writes the **FCC nesting XML** a **Nanxing** production line imports — one job packet carrying the cutting layout, the **drilling and grooving** read straight off the B‑Rep, the **edgebanding** spec and the order data the labels print. Reads holes and grooves geometrically rather than from how they were modelled, so hand‑modelled joinery exports as readily as Line Boring's. Writes the machine's *pre‑nest* form: the line's own software still assigns the tool, generates the NC program and places the labels. See `docs/FCC_EXPORT.md`. |
 | **BOM** | A **docked palette** showing the **assembly hierarchy** — root → components → sub‑components — one row per component with its **type, dimensions, material, quantity and part number** (the native Fusion `Component.partNumber`). Expand/collapse the tree and **Export to Excel** (a native `.xlsx`, written with the stdlib — no add‑on dependency, with **live formulas** so costs recalc when you tweak quantities). Shows the active **configuration** name. This is the structural bill; the cutting/nesting view lives in Cut List & Nest. |
 | **Settings** | Add‑on‑wide options shared by every design (stored next to the Sheets library). Today that's the panel‑cost **waste factor** — the percentage added on top of a panel's raw area when the BOM estimates its cost from sheet prices, since nesting never uses 100 % of a sheet. Not promoted to the toolbar; find it in the Output panel's overflow. |
 
@@ -257,6 +258,8 @@ WoodCraft/
 │   ├── countertop_geom.py      # pure-math worktop outline from wall + side panels (no Fusion API)
 │   ├── skirting_geom.py        # pure-math plinth outlines: mitred corners, 3 m splitting (no Fusion API)
 │   ├── nesting.py              # pure-math guillotine nester + SVG (no Fusion API)
+│   ├── fcc_writer.py           # FCC nesting-XML format: plain dicts in, machine file out (pure)
+│   ├── fcc_features.py         # B-Rep -> flat-panel frame, holes, grooves, banded edges
 │   ├── sheets_store.py         # global stock-sheet + edgeband library (load/save/match; pure)
 │   ├── settings_store.py       # global add-on settings JSON (waste factor)
 │   ├── finish_store.py         # per-dropdown material/appearance name lists (pure)
@@ -271,6 +274,7 @@ WoodCraft/
 │   ├── skirting/               # Kitchen panel: the plinth
 │   ├── sheets/                 # Sheets palette: entry.py + resources/html/{index,style,main}
 │   ├── cutList/                # Cut List & Nest
+│   ├── fccExport/              # FCC Export: nesting XML for a Nanxing line
 │   ├── bom/                    # BOM palette: entry.py + resources/html/{index,style,main}
 │   ├── settings/               # Add-on settings dialog
 │   ├── createKitchenTemplate/  # Kitchen TAB: stock a spare kitchen + library copy
@@ -278,7 +282,9 @@ WoodCraft/
 │   ├── finishKitchen/          # Kitchen TAB: clear the unused library copy
 │   └── inspectPanels/          # Dev tool (removable)
 ├── lib/fusionAddInUtils/       # Autodesk template helpers (logging, event wiring)
-└── docs/UI_GUIDE.md            # icon / UI guide for design work
+├── tests/test_fcc_writer.py    # the FCC format, checked with plain Python (no Fusion)
+├── docs/UI_GUIDE.md            # icon / UI guide for design work
+└── docs/FCC_EXPORT.md          # the FCC machine format, and what the exporter does with it
 ```
 
 Each command is a self‑contained folder with an `entry.py` exposing `start()` /
@@ -294,6 +300,7 @@ append it to the `commands` list, and drop icons in its `resources/`. See
   several heuristics and keeps the tightest layout, but won't beat true‑shape
   nesting on yield. Fusion's own Nesting *Process Material Library* is **not**
   API‑readable (paid extension), which is why WoodCraft keeps its own library.
+- **FCC Export reads holes geometrically**, so a bore that runs into another feature (a dowel hole breaking into a cam housing) reports the depth of its own cylindrical face, not the nominal drill depth. It reports straight, axis-aligned grooves only — shaped pockets and curved dados are left out rather than guessed at. One sizing rule in the format is still unconfirmed with the machine builder; `fcc_writer.SIZE_POLICY` switches between the two readings and `docs/FCC_EXPORT.md` explains the difference.
 - **Trim gap** is positive (clearance) only — a negative‑offset "groove" mode was
   removed for lack of a clean uniform solid‑offset API. (Shelf offsets *do* allow
   negatives.)
