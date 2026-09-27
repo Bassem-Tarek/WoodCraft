@@ -18,15 +18,18 @@
 Shared by Create Configurations, and by Fit Handles, which needs the same naming
 rules when it adds a row of its own.
 
-Create Configurations does two things, both driven from here:
+Create Configurations does three things, all driven from here, in this order:
 
-    rename_plan / rename   bring the rows already in the table into line with the
+    plan                   read the table and work out everything below without
+                           changing anything — the dialog shows it as a dry run.
+    delete_duplicates      remove rows carrying the same combination of theme
+                           values as another row, keeping one of each.
+    rename                 bring the rows left in the table into line with the
                            naming scheme below, so hand-made rows and generated
                            ones read the same.
-    plan / create          work out every combination of the design's theme
-                           tables and add a row for each one missing.
+    create                 add a row for every combination still missing.
 
-Neither builds geometry. Fusion builds a configuration when it is activated, and
+None of them builds geometry. Fusion builds a configuration when it is activated, and
 a row cannot be built until the document has been saved anyway, so the geometry
 is left to Fusion and to whoever opens the row.
 """
@@ -255,7 +258,7 @@ class Plan:
     __slots__ = ('vary', 'axes', 'total', 'present', 'to_create', 'clashes',
                  'untouched', 'base', 'prefix', 'error',
                  'rows', 'to_rename', 'named_right', 'rename_dupes',
-                 'unreadable')
+                 'unreadable', 'to_delete', 'undeletable')
 
     def __init__(self, error=None):
         self.vary = ()
@@ -272,17 +275,34 @@ class Plan:
         self.rows = 0
         self.to_rename = []      # [{'index': i, 'old': name, 'new': name}]
         self.named_right = 0     # rows the scheme already agrees with
-        self.rename_dupes = []   # rows whose scheme name another row also wants
+        self.rename_dupes = []   # rows whose scheme name a DIFFERENT combination wants
         self.unreadable = []     # rows with a cell that could not be read
+        # Duplicates: rows carrying the same combination as a row being kept.
+        self.to_delete = []      # [{'id': row id, 'name': name, 'keeps': name}]
+        self.undeletable = []    # duplicates Fusion will not delete (the active row)
 
 
-def plan(design, document_name, rename=True):
-    """Work out what to rename and what to create. Reads only; changes nothing.
+def _active_row_id(table):
+    try:
+        row = table.activeRow
+        return row.id if row else None
+    except Exception:
+        return None
 
-    `rename` says whether the rows already in the table will be brought into line
-    with the naming scheme first. It only affects the plan's view of which names
-    are taken — with renaming on, an old hand-typed name is about to be freed and
-    so cannot collide with a row about to be created."""
+
+def plan(design, document_name, rename=True, dedupe=True):
+    """Work out what to delete, rename and create. Reads only; changes nothing.
+
+    `dedupe` finds rows that carry exactly the same combination of the varied
+    themes as another row. One of each group is kept — the table's first row if
+    it is in the group (Fusion will not delete that one), then the active row,
+    then a row already named to the scheme, then the earliest — and the rest are
+    listed for deletion. Their names are then free for the rows that stay.
+
+    `rename` says whether the rows that stay will be brought into line with the
+    naming scheme. It only affects the plan's view of which names are taken —
+    with renaming on, an old hand-typed name is about to be freed and so cannot
+    collide with a row about to be created."""
     table = top_table(design)
     if table is None:
         return Plan('This document has no configuration table. Open the '
@@ -323,28 +343,51 @@ def plan(design, document_name, rename=True):
     inherited = combination_of(columns, result.base)
     result.untouched = {t: v for t, v in inherited.items() if t not in vary}
 
-    # The rows already in the table: which combinations they cover, and what the
-    # naming scheme would call each of them.
-    existing, taken = {}, set()
     result.rows = table.rows.count
-    wanted = {}
+    active_id = _active_row_id(table)
+
+    # Group the rows already in the table by the combination they carry.
+    taken = set()
+    groups = {}              # combination key -> [(index, row)]
     for i in range(table.rows.count):
         row = table.rows.item(i)
         whole = combination_of(columns, row)
-        existing[tuple(whole.get(t, '') for t in vary)] = row.name
-
-        # A cell that would not read leaves the row unnamed rather than named
-        # from a hole: '' is not a value, it is a failure to find one.
+        # A cell that would not read leaves the row alone rather than naming or
+        # deleting it from a hole: '' is not a value, it is a failure to find one.
         if any(not whole.get(t) for t in vary):
             result.unreadable.append(row.name)
             taken.add(row.name)
             continue
+        key = tuple(whole[t] for t in vary)
+        groups.setdefault(key, []).append((i, row, whole))
 
-        scheme = row_name(result.prefix, whole, vary)
+    wanted = {}
+    for key, members in groups.items():
+        scheme = row_name(result.prefix, members[0][2], vary)
+
+        def rank(member):
+            i, row, _whole = member
+            return (i != 0, row.id != active_id, row.name != scheme, i)
+
+        members.sort(key=rank)
+        keeper = members[0]
+        for i, row, _whole in members[1:]:
+            if not dedupe:
+                result.rename_dupes.append(row.name)
+                taken.add(row.name)
+            elif i == 0 or row.id == active_id:
+                # Fusion refuses to delete the first row, and deleting the row
+                # that is open would pull the design out from under the user.
+                result.undeletable.append(row.name)
+                taken.add(row.name)
+            else:
+                result.to_delete.append({'id': row.id, 'name': row.name,
+                                         'keeps': keeper[1].name})
+
+        i, row, _whole = keeper
         if scheme in wanted:
-            # Two rows carrying the same combination — a duplicate row, or two
-            # combinations the scheme spells the same way. Only the first takes
-            # the name; the rest keep theirs and are reported.
+            # A DIFFERENT combination the scheme spells the same way. Only the
+            # first takes the name; the rest keep theirs and are reported.
             result.rename_dupes.append(row.name)
             taken.add(row.name)
             continue
@@ -362,7 +405,7 @@ def plan(design, document_name, rename=True):
     planned = set()
     for combination in combinations:
         key = tuple(combination[t] for t in vary)
-        if key in existing:
+        if key in groups:
             continue
         name = row_name(result.prefix, combination, vary)
         if name in taken or name in planned:
@@ -371,6 +414,30 @@ def plan(design, document_name, rename=True):
         result.to_create.append((name, combination))
     result.present = result.total - len(result.to_create)
     return result
+
+
+def delete_duplicates(design, result):
+    """Delete every duplicate row the plan lists. Returns (deleted, problems).
+
+    Rows are found again by id, never by index: every deletion shifts the
+    indexes of the rows after it. Run before rename(), and plan again after it —
+    the indexes the plan recorded are stale once anything has gone."""
+    table = top_table(design)
+    if table is None or not result.to_delete:
+        return 0, []
+    deleted, problems = 0, []
+    for item in result.to_delete:
+        try:
+            row = table.rows.itemById(item['id'])
+            if row is None:
+                continue
+            if row.deleteMe():
+                deleted += 1
+            else:
+                problems.append(f"{item['name']}: Fusion would not delete it")
+        except Exception as exc:
+            problems.append(f"{item['name']}: {exc}")
+    return deleted, problems
 
 
 def rename(design, result):

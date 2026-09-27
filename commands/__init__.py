@@ -26,7 +26,6 @@ from .shelf import entry as shelf
 from .lineBoring import entry as lineBoring
 from .convertPanel import entry as convertPanel
 from .configRows import entry as configRows
-from .configBuild import entry as configBuild
 from .setFinish import entry as setFinish
 from .finishLists import entry as finishLists
 from .edgeband import entry as edgeband
@@ -56,7 +55,6 @@ commands = [
     lineBoring,
     convertPanel,
     configRows,
-    configBuild,
     setFinish,
     finishLists,
     edgeband,

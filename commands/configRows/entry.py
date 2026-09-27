@@ -13,18 +13,20 @@
 # You should have received a copy of the GNU General Public License along with
 # this program.  If not, see <https://www.gnu.org/licenses/>.
 
-"""Create Configurations — every combination of the theme tables, named alike.
+"""Create Configurations — every combination of the theme tables, once, named alike.
 
 Run it on a configured design (the cabinet itself, not a kitchen that places
-one). It reads that design's own theme tables and does two things:
+one). It reads that design's own theme tables and does three things:
 
-    1. renames the rows already in the table to the naming scheme, so a row
-       typed by hand years ago reads the same as one made this morning;
-    2. adds a row for every combination that is not there yet.
+    1. deletes duplicate rows — rows carrying exactly the same combination of
+       theme values as another row — keeping one of each;
+    2. renames the rows left in the table to the naming scheme, so a row typed
+       by hand years ago reads the same as one made this morning;
+    3. adds a row for every combination that is not there yet.
 
-The dialog IS the dry run: opening it shows every rename and every new row and
-changes nothing, so OK is only ever pressed on a plan you have read. Renaming can
-be switched off with the checkbox if you only want the new rows.
+The dialog IS the dry run: opening it shows every deletion, every rename and
+every new row and changes nothing, so OK is only ever pressed on a plan you have
+read.
 
 It creates rows and stops. It does not build them and it does not save. Fusion
 builds a configuration when the row is activated, and a row cannot be built until
@@ -32,8 +34,8 @@ the document has been saved anyway — build one created moments ago in an unsav
 document and Fusion answers "Select failed because Configuration was temporarily
 unavailable".
 
-Safe to run again — it skips combinations that already exist and rows already
-named right, so adding a value to a theme table and re-running only creates the
+Safe to run again — it skips combinations that already exist once and rows
+already named right, so adding a value to a theme table and re-running only creates the
 rows that value made possible.
 """
 
@@ -53,9 +55,9 @@ ui = app.userInterface
 CMD_ID = f'{config.COMPANY_NAME}_configRows'
 CMD_NAME = 'Create Configurations'
 CMD_Description = (
-    'Rename this configured design\'s existing configurations to the naming '
-    'scheme and add a row for every combination of its theme tables that is '
-    'missing. Rows only — nothing is built and nothing is saved.'
+    'Tidy this configured design\'s configurations: remove repeated ones, '
+    'rename the rest to the naming scheme, and add every combination of its '
+    'theme tables that is missing. Nothing is built and nothing is saved.'
 )
 # Sits on the face of the panel next to the other Cabinet Builder commands
 # rather than inside the drop-down.
@@ -68,7 +70,6 @@ PANEL_NAME = config.CABINET_PANEL_NAME
 ICON_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'resources', '')
 
 INFO_ID = 'cr_info'
-RENAME_ID = 'cr_rename'
 
 # Row creation is quick, but it is still table surgery, and the same rule that
 # bit Fit Handles applies: Fusion does not settle a document mid-command. The
@@ -78,17 +79,17 @@ RUN_EVENT_ID = 'WoodCraftCreateConfigurationsRun'
 local_handlers = []
 _event_handlers = []
 _run_event = None
-_pending = None          # the rename flag while a run is queued, else None
+_pending = False         # True while a run is queued
 
 
 class _RunHandler(adsk.core.CustomEventHandler):
     def notify(self, args):
         global _pending
-        job, _pending = _pending, None
-        if job is None:
+        job, _pending = _pending, False
+        if not job:
             return
         try:
-            _create(job)
+            _create()
         except Exception:
             futil.handle_error(CMD_NAME)
 
@@ -135,15 +136,38 @@ def stop():
 # ---------------------------------------------------------------------------
 # Dialog
 # ---------------------------------------------------------------------------
-def _current_plan(rename=True):
+def _current_plan():
     design = adsk.fusion.Design.cast(app.activeProduct)
     if not design:
         return None, None
-    return design, config_table.plan(design, app.activeDocument.name, rename)
+    return design, config_table.plan(design, app.activeDocument.name,
+                                     rename=True, dedupe=True)
+
+
+def _delete_lines(result):
+    """The duplicates part of the summary."""
+    lines = []
+    if result.to_delete:
+        lines.append('<b>%d duplicate row(s) to delete</b> — same values as a '
+                     'row that is kept:' % len(result.to_delete))
+        for item in result.to_delete[:4]:
+            lines.append('&nbsp;&nbsp;%s &nbsp;(same as %s)'
+                         % (item['name'], item['keeps']))
+        if len(result.to_delete) > 4:
+            lines.append('&nbsp;&nbsp;… and %d more.'
+                         % (len(result.to_delete) - 4))
+    else:
+        lines.append('No duplicate rows.')
+    if result.undeletable:
+        lines.append('<b>%d duplicate(s) kept</b> — the first or the open '
+                     'configuration cannot be removed: %s'
+                     % (len(result.undeletable),
+                        ', '.join(result.undeletable[:4])))
+    return lines
 
 
 def _rename_lines(result):
-    """The rename half of the summary."""
+    """The rename part of the summary."""
     lines = []
     if result.to_rename:
         lines.append('<b>%d row(s) to rename</b> (%d already named right).'
@@ -154,14 +178,14 @@ def _rename_lines(result):
         if len(result.to_rename) > 4:
             lines.append('&nbsp;&nbsp;… and %d more.'
                          % (len(result.to_rename) - 4))
-    elif result.named_right == result.rows and result.rows:
-        lines.append('All %d existing row(s) already match the naming scheme.'
-                     % result.rows)
+    elif result.named_right and not result.rename_dupes and not result.unreadable:
+        lines.append('All %d remaining row(s) already match the naming scheme.'
+                     % result.named_right)
     else:
         lines.append('No existing row will be renamed.')
     if result.rename_dupes:
-        lines.append('<b>%d row(s) keep their name</b> — another row wants the '
-                     'same one: %s' % (len(result.rename_dupes),
+        lines.append('<b>%d row(s) keep their name</b> — a different '
+                     'combination is spelled the same: %s' % (len(result.rename_dupes),
                                        ', '.join(result.rename_dupes[:4])))
     if result.unreadable:
         lines.append('<b>%d row(s) could not be read</b> and are left alone: %s'
@@ -190,6 +214,8 @@ def _summary(result):
                       for t, v in sorted(result.untouched.items()))))
 
     lines.append('')
+    lines.extend(_delete_lines(result))
+    lines.append('')
     lines.extend(_rename_lines(result))
 
     if result.clashes:
@@ -205,7 +231,8 @@ def _summary(result):
             lines.append('… and %d more.' % (len(result.to_create) - 3))
         lines.append('')
     lines.append('Rows and names only — nothing is built and nothing is saved.')
-    return '<br>'.join(lines), bool(result.to_create or result.to_rename)
+    return '<br>'.join(lines), bool(result.to_create or result.to_rename
+                                    or result.to_delete)
 
 
 def command_created(args: adsk.core.CommandCreatedEventArgs):
@@ -217,12 +244,7 @@ def command_created(args: adsk.core.CommandCreatedEventArgs):
     except Exception:
         pass
 
-    _design, result = _current_plan(True)
-
-    rename = inputs.addBoolValueInput(
-        RENAME_ID, 'Rename existing configurations to match', True, '', True)
-    rename.tooltip = ('Bring the rows already in the table into line with the '
-                      'naming scheme before the missing ones are added.')
+    _design, result = _current_plan()
 
     text, can_run = _summary(result)
     info = inputs.addTextBoxCommandInput(INFO_ID, '', text, 14, True)
@@ -231,44 +253,28 @@ def command_created(args: adsk.core.CommandCreatedEventArgs):
     args.command.okButtonText = 'Create'
     args.command.isOKButtonVisible = can_run
 
-    futil.add_handler(args.command.inputChanged, command_input_changed, local_handlers=local_handlers)
     futil.add_handler(args.command.execute, command_execute, local_handlers=local_handlers)
     futil.add_handler(args.command.destroy, command_destroy, local_handlers=local_handlers)
-
-
-def command_input_changed(args: adsk.core.InputChangedEventArgs):
-    """Ticking the rename box re-plans: it changes which names are free."""
-    if args.input.id != RENAME_ID:
-        return
-    command = args.firingEvent.sender
-    inputs = command.commandInputs
-    box = inputs.itemById(RENAME_ID)
-    _design, result = _current_plan(bool(box.value) if box else True)
-    text, can_run = _summary(result)
-    info = inputs.itemById(INFO_ID)
-    if info:
-        info.formattedText = text
-    try:
-        command.isOKButtonVisible = can_run
-    except Exception:
-        pass
 
 
 def command_execute(args: adsk.core.CommandEventArgs):
     futil.log(f'{CMD_NAME} Command Execute Event')
     global _pending
-    box = args.command.commandInputs.itemById(RENAME_ID)
-    _pending = bool(box.value) if box else True
+    _pending = True
     _arm_event()
     app.fireCustomEvent(RUN_EVENT_ID)
 
 
-def _create(do_rename=True):
-    """Runs after the dialog has closed, where the document settles normally."""
+def _create():
+    """Runs after the dialog has closed, where the document settles normally.
+
+    Delete, then rename, then create — planning afresh after each step that
+    changes the table, because row indexes and free names move with it."""
     design = adsk.fusion.Design.cast(app.activeProduct)
     if not design:
         return
-    result = config_table.plan(design, app.activeDocument.name, do_rename)
+    name = app.activeDocument.name
+    result = config_table.plan(design, name, rename=True, dedupe=True)
     if result.error:
         ui.messageBox(result.error, CMD_NAME)
         return
@@ -276,20 +282,31 @@ def _create(do_rename=True):
     lines = []
     problems = []
 
+    # 1. Duplicates go first, so the names they held are free for the renames.
+    deleted = 0
+    if result.to_delete:
+        deleted, delete_problems = config_table.delete_duplicates(design, result)
+        problems.extend(delete_problems)
+        result = config_table.plan(design, name, rename=True, dedupe=True)
+        if result.error:
+            ui.messageBox('\n'.join([f'Deleted {deleted} duplicate(s).', '',
+                                     result.error]), CMD_NAME)
+            return
+    lines.append(f'Deleted {deleted} duplicate configuration(s).')
+
+    # 2. Rename what is left.
     renamed = 0
-    if do_rename and result.to_rename:
+    if result.to_rename:
         renamed, rename_problems = config_table.rename(design, result)
         problems.extend(rename_problems)
-        lines.append(f'Renamed {renamed} configuration(s).')
-        # The table has changed under the plan, so work the rest out again
-        # rather than trusting names that were only ever a proposal.
-        result = config_table.plan(design, app.activeDocument.name, False)
+        result = config_table.plan(design, name, rename=False, dedupe=True)
         if result.error:
-            ui.messageBox('\n'.join(lines + ['', result.error]), CMD_NAME)
+            ui.messageBox('\n'.join(lines + [f'Renamed {renamed}.', '',
+                                             result.error]), CMD_NAME)
             return
-    elif do_rename:
-        lines.append('No configuration needed renaming.')
+    lines.append(f'Renamed {renamed} configuration(s).')
 
+    # 3. Fill in every combination still missing.
     made = 0
     if result.to_create:
         made, create_problems = config_table.create(design, result)
@@ -299,9 +316,15 @@ def _create(do_rename=True):
     table = config_table.top_table(design)
     if table is not None:
         lines.append(f'The table now has {table.rows.count} rows.')
+    if result.undeletable:
+        lines.append('')
+        lines.append('Duplicates kept — the first or the open configuration '
+                     'cannot be removed:')
+        lines.extend(f'  {n}' for n in result.undeletable[:10])
     if result.rename_dupes:
         lines.append('')
-        lines.append('Kept their own name — another row wants the same one:')
+        lines.append('Kept their own name — a different combination is spelled '
+                     'the same:')
         lines.extend(f'  {n}' for n in result.rename_dupes[:10])
     if result.unreadable:
         lines.append('')
