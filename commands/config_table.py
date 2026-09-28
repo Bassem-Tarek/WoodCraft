@@ -40,15 +40,22 @@ import re
 import adsk.core
 import adsk.fusion
 
+from .. import config
+
 
 # Themes to vary. Empty means every theme the design has, bar the exclusions —
 # which is what lets these commands work on a cabinet they have never seen.
 VARY = ()
 
-# Themes never varied and never named. Partition is decided by configuration
-# rules, and writing it through the API does not make those rules fire, so a row
-# inherits whatever its source row had. Matched loosely, like everything below.
-EXCLUDE = ('Partition',)
+# Themes never varied, never named and never written, because configuration
+# RULES set them (Partition, Shelves / number of shelves, …): the rule decides
+# their value for every row, so the command leaves them entirely alone. Rows
+# that differ ONLY in such a theme count as duplicates — one row per
+# combination of the other themes is kept. The lists live in config.py
+# (CONFIG_RULE_THEMES / CONFIG_RULE_KEYWORDS) so a new rule-driven theme can be
+# added without touching code. Matched loosely, like every name here.
+EXCLUDE = tuple(getattr(config, 'CONFIG_RULE_THEMES', ('Partition',)))
+RULE_KEYWORDS = tuple(getattr(config, 'CONFIG_RULE_KEYWORDS', ()))
 
 
 # ---------------------------------------------------------------------------
@@ -136,8 +143,16 @@ def is_gola(value):
 
 
 def is_excluded(title):
-    """Is this theme one whose value is inherited rather than chosen?"""
-    return any(same_name(title, name) for name in EXCLUDE)
+    """Is this theme one set by configuration rules, rather than chosen?
+
+    An exact (loose) name in EXCLUDE, or a title CONTAINING one of the
+    RULE_KEYWORDS — so 'Shelves', 'No. of Shelves' and 'Shelf Count' are all
+    caught by the one keyword 'shelf'."""
+    if any(same_name(title, name) for name in EXCLUDE):
+        return True
+    key = normalized(title)
+    return any(normalized(word) and normalized(word) in key
+               for word in RULE_KEYWORDS)
 
 
 def is_handles_theme(title):

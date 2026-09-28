@@ -178,6 +178,23 @@ KITCHEN_MAX_DEPTH = 12
 KITCHEN_MAX_LISTED = 200
 
 # ---------------------------------------------------------------------------
+# Create Configurations — themes set by configuration RULES
+# ---------------------------------------------------------------------------
+# Themes that configuration rules drive (e.g. the number of shelves following
+# the cabinet height) must not be multiplied into every combination: the rules
+# decide them. Create Configurations ignores these themes entirely — it
+# doesn't vary them, doesn't put them in row names and never writes them; rows
+# that differ only in such a theme are duplicates (one per combination kept).
+#
+# CONFIG_RULE_THEMES are whole theme names (case/spaces/punctuation ignored).
+# CONFIG_RULE_KEYWORDS match any theme whose name CONTAINS the word, so
+# 'Shelves', 'No. of Shelves' and 'Shelf Count' are all caught by 'shelf'.
+CONFIG_RULE_THEMES = ('Partition', 'Partitions', 'Shelves', 'Shelf',
+                      'Number of Shelves', 'No of Shelves', 'Shelf Count',
+                      'Shelves Count')
+CONFIG_RULE_KEYWORDS = ('shelf', 'shelves', 'partition')
+
+# ---------------------------------------------------------------------------
 # Hardware library
 # ---------------------------------------------------------------------------
 # The Insert Hardware command reads its catalogue from a dedicated Fusion cloud
