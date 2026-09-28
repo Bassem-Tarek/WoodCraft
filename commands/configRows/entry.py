@@ -208,10 +208,14 @@ def _summary(result):
                  % (result.present, len(result.to_create)))
     if result.untouched:
         lines.append('')
-        lines.append('Not varied — inherited from "%s": %s' % (
-            result.base.name,
-            ', '.join('%s = %s' % (t, v)
-                      for t, v in sorted(result.untouched.items()))))
+        lines.append('<b>Ignored — set by configuration rules:</b> %s.'
+                     % ', '.join(sorted(result.untouched)))
+        for title, (driver, _mapping) in sorted(result.rule_links.items()):
+            lines.append('&nbsp;&nbsp;%s follows %s in the existing rows, so new '
+                         'rows get the matching value.' % (title, driver))
+        if len(result.rule_links) < len(result.untouched):
+            lines.append('&nbsp;&nbsp;Otherwise a new row copies the most similar '
+                         'existing row.')
 
     lines.append('')
     lines.extend(_delete_lines(result))
