@@ -23,6 +23,8 @@ Current keys:
     waste_percent — % added on top of a panel's raw area when estimating its
         cost from sheet prices in the BOM (nesting never uses 100% of a sheet,
         so a pure area × rate estimate would systematically undershoot).
+    kitchen_project_type — the project type (B2B / B2C) last picked in Create
+        Kitchen Template or New Kitchen, pre-selected next time.
 
 New settings plug in by adding a key to DEFAULTS; load() overlays the file on
 the defaults so older files simply pick up new keys. No Fusion API here — this
@@ -36,6 +38,7 @@ from . import sheets_store
 
 DEFAULTS = {
     'waste_percent': 10.0,
+    'kitchen_project_type': '',
 }
 
 
@@ -57,6 +60,8 @@ def normalize(data):
     if isinstance(data, dict):
         out['waste_percent'] = max(0.0, _num(data.get('waste_percent'),
                                               DEFAULTS['waste_percent']))
+        kind = data.get('kitchen_project_type')
+        out['kitchen_project_type'] = kind.strip() if isinstance(kind, str) else ''
     return out
 
 
@@ -90,3 +95,14 @@ def set_waste_percent(value):
     settings = load()
     settings['waste_percent'] = value
     return save(settings)['waste_percent']
+
+
+def get_kitchen_project_type():
+    """The kitchen project type picked last time ('' if never)."""
+    return load()['kitchen_project_type']
+
+
+def set_kitchen_project_type(value):
+    settings = load()
+    settings['kitchen_project_type'] = value or ''
+    return save(settings)['kitchen_project_type']

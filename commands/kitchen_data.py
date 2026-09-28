@@ -19,8 +19,8 @@ Everything here talks to Fusion's **Data** API (projects, folders, files) rather
 than to geometry, and it is deliberately kept out of the three command modules so
 the workflow reads in one place:
 
-    Create Kitchen      Clients / Kitchens / "Kitchen Template <n>" / Library
-    Template            <- recursive copy of Emaar Library / Kitchen Library
+    Create Kitchen      Projects / <B2B|B2C> / Kitchen / "Kitchen Template <n>" / Library
+    Template            <- recursive copy of Library / Kitchen
                         + a new hybrid design named after the folder
 
     New Kitchen         rename the NEWEST waiting template folder AND its design
@@ -105,25 +105,48 @@ def kitchen_folder_name(customer, stamp=None):
 # ---------------------------------------------------------------------------
 # Finding projects and folders
 # ---------------------------------------------------------------------------
-def find_project(project_name):
-    """The named cloud project, checking the active hub first then every other
-    hub the user can see. Returns None if no hub has it."""
+def _hubs_to_search():
+    """The hubs a kitchen may live in: only the one active in Fusion right now
+    when config.KITCHEN_ACTIVE_HUB_ONLY is on (the default), else the active hub
+    first and then every other hub the user can see."""
+    hubs = []
     try:
         active = app.data.activeHub
-        if active:
-            found = _project_in_hub(active, project_name)
-            if found:
-                return found
-        hubs = app.data.dataHubs
-        for h in range(hubs.count):
-            hub = hubs.item(h)
-            if active and hub.id == active.id:
-                continue  # already checked
-            found = _project_in_hub(hub, project_name)
-            if found:
-                return found
+    except Exception:
+        active = None
+    if active:
+        hubs.append(active)
+    if getattr(config, 'KITCHEN_ACTIVE_HUB_ONLY', True) and active:
+        return hubs
+    try:
+        all_hubs = app.data.dataHubs
+        for h in range(all_hubs.count):
+            hub = all_hubs.item(h)
+            if not active or hub.id != active.id:
+                hubs.append(hub)
     except Exception:
         pass
+    return hubs
+
+
+def active_hub_name():
+    """Display name of the hub (team) open in Fusion, or '' if unknown."""
+    try:
+        return app.data.activeHub.name
+    except Exception:
+        return ''
+
+
+def find_project(project_name):
+    """The named cloud project in the active hub (and, only when
+    KITCHEN_ACTIVE_HUB_ONLY is off, any other hub). Returns None if not found."""
+    for hub in _hubs_to_search():
+        try:
+            found = _project_in_hub(hub, project_name)
+        except Exception:
+            found = None
+        if found:
+            return found
     return None
 
 
@@ -137,18 +160,24 @@ def _project_in_hub(hub, project_name):
 
 
 def all_project_names():
-    """Every project name visible to the user — shown in the dialog when a
+    """Every project name in the searched hub(s) — shown in the dialog when a
     configured project can't be found, so the exact spelling can be copied."""
     names = []
-    try:
-        hubs = app.data.dataHubs
-        for h in range(hubs.count):
-            projects = hubs.item(h).dataProjects
+    for hub in _hubs_to_search():
+        try:
+            projects = hub.dataProjects
             for i in range(projects.count):
                 names.append(projects.item(i).name)
-    except Exception:
-        pass
+        except Exception:
+            continue
     return names
+
+
+def _not_found(what, setting):
+    hub = active_hub_name()
+    where = f" in the '{hub}' hub" if hub else ''
+    return (f"{what} not found{where}. Set {setting} in config.py to one of: "
+            f"{', '.join(all_project_names()) or '(no projects visible)'}")
 
 
 def subfolder_by_name(folder, name):
@@ -181,9 +210,8 @@ def library_source_folder():
     ready-to-show sentence when the folder can't be resolved."""
     project = find_project(config.LIBRARY_PROJECT_NAME)
     if not project:
-        return None, (f"Library project '{config.LIBRARY_PROJECT_NAME}' not found. "
-                      f"Set LIBRARY_PROJECT_NAME in config.py to one of: "
-                      f"{', '.join(all_project_names()) or '(no projects visible)'}")
+        return None, _not_found(f"Library project '{config.LIBRARY_PROJECT_NAME}'",
+                                'LIBRARY_PROJECT_NAME')
     root = project.rootFolder
     wanted = (config.LIBRARY_SOURCE_FOLDER or '').strip()
     if not wanted:
@@ -211,34 +239,108 @@ def unique_folder_name(parent, name):
 # ---------------------------------------------------------------------------
 # The kitchens root, and the templates waiting in it
 # ---------------------------------------------------------------------------
-def kitchens_root():
-    """(folder, error) for the folder that holds every template and job folder —
-    config.KITCHENS_PROJECT_NAME / config.KITCHENS_FOLDER_NAME.
+def project_types():
+    """The project types offered in the dialogs (config.KITCHEN_PROJECT_TYPES),
+    e.g. ['B2B', 'B2C']."""
+    types = getattr(config, 'KITCHEN_PROJECT_TYPES', ()) or ()
+    if isinstance(types, str):
+        types = [types]
+    return [t for t in (str(x).strip() for x in types) if t]
 
-    The sub-folder is CREATED if it's missing (a fresh Clients project has no
-    Kitchens folder yet), but the project is never created: a wrong project name
-    should be reported, not silently worked around."""
+
+def kitchens_where(project_type):
+    """'Projects / B2B / Kitchen' — the display path of a type's kitchens folder."""
+    parts = [config.KITCHENS_PROJECT_NAME, project_type, config.KITCHENS_FOLDER_NAME]
+    return ' / '.join(p for p in parts if p)
+
+
+def kitchens_root(project_type):
+    """(folder, error) for the folder that holds every template and job folder of
+    one project type — config.KITCHENS_PROJECT_NAME / <project_type> /
+    config.KITCHENS_FOLDER_NAME, e.g. Projects / B2B / Kitchen.
+
+    The innermost Kitchen folder is CREATED if it's missing, but the project and
+    the type folder are never created: a wrong name should be reported, not
+    silently worked around."""
     project = find_project(config.KITCHENS_PROJECT_NAME)
     if not project:
-        return None, (f"Project '{config.KITCHENS_PROJECT_NAME}' not found. "
-                      f"Set KITCHENS_PROJECT_NAME in config.py to one of: "
-                      f"{', '.join(all_project_names()) or '(no projects visible)'}")
-    root = project.rootFolder
+        return None, _not_found(f"Project '{config.KITCHENS_PROJECT_NAME}'",
+                                'KITCHENS_PROJECT_NAME')
+    folder = project.rootFolder
+
+    project_type = (project_type or '').strip()
+    if project_type:
+        type_folder = subfolder_by_name(folder, project_type)
+        if not type_folder:
+            return None, (f"Folder '{project_type}' not found in project "
+                          f"'{config.KITCHENS_PROJECT_NAME}'. Check "
+                          f"KITCHEN_PROJECT_TYPES in config.py.")
+        folder = type_folder
+
     wanted = (config.KITCHENS_FOLDER_NAME or '').strip()
     if not wanted:
-        return root, None
-
-    folder = subfolder_by_name(root, wanted)
-    if folder:
         return folder, None
+    kitchens = subfolder_by_name(folder, wanted)
+    if kitchens:
+        return kitchens, None
     try:
-        folder = root.dataFolders.add(wanted)
+        kitchens = folder.dataFolders.add(wanted)
     except Exception:
-        folder = None
-    if not folder:
+        kitchens = None
+    if not kitchens:
         return None, (f"Could not find or create the '{wanted}' folder in "
-                      f"'{config.KITCHENS_PROJECT_NAME}'.")
-    return folder, None
+                      f"'{kitchens_where(project_type).rsplit(' / ', 1)[0]}'.")
+    return kitchens, None
+
+
+def default_project_type():
+    """The type to pre-select in a dialog: the one picked last time if it is
+    still configured, else the first configured type ('' if none)."""
+    types = project_types()
+    try:
+        from . import settings_store
+        last = settings_store.get_kitchen_project_type()
+    except Exception:
+        last = ''
+    for t in types:
+        if t.lower() == (last or '').lower():
+            return t
+    return types[0] if types else ''
+
+
+def remember_project_type(project_type):
+    """Remember the chosen type for next time. Never fatal."""
+    try:
+        from . import settings_store
+        settings_store.set_kitchen_project_type(project_type)
+    except Exception:
+        pass
+
+
+def project_type_of(document):
+    """The project type (e.g. 'B2B') a saved kitchen design belongs to, read off
+    its folder chain: <job folder> / Kitchen / B2B / (Projects root). Returns ''
+    when the design isn't inside any configured type folder."""
+    types = {t.lower(): t for t in project_types()}
+    if not types:
+        return ''
+    try:
+        folder = document.dataFile.parentFolder
+    except Exception:
+        return ''
+    for _ in range(config.KITCHEN_MAX_DEPTH):
+        if not folder:
+            break
+        try:
+            match = types.get(folder.name.strip().lower())
+            if match:
+                return match
+            if folder.isRoot:
+                break
+            folder = folder.parentFolder
+        except Exception:
+            break
+    return ''
 
 
 # "Kitchen Template 7" -> 7. Anchored, so "Kitchen Template 7 (old)" is NOT a

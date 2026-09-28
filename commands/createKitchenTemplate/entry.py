@@ -15,8 +15,8 @@
 
 """Create Kitchen Template — stock a ready-to-use kitchen ahead of time.
 
-Builds, under ``Clients / Kitchens`` (``config.KITCHENS_PROJECT_NAME`` /
-``config.KITCHENS_FOLDER_NAME``):
+Asks for the project type (B2B or B2C, ``config.KITCHEN_PROJECT_TYPES``) and
+builds, under ``Projects / <type> / Kitchen`` in the hub open in Fusion:
 
     Kitchen Template <n>/
         Kitchen Template <n>     a new hybrid design, saved and closed
@@ -65,6 +65,7 @@ TAB_NAME = config.KITCHEN_TAB_NAME
 
 ICON_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'resources', '')
 
+TYPE_ID = 'ckt_type'
 COUNT_ID = 'ckt_count'
 PREVIEW_ID = 'ckt_preview'
 INFO_ID = 'ckt_info'
@@ -76,6 +77,7 @@ local_handlers = []
 CREATE_EVENT_ID = f'{config.COMPANY_NAME}_createKitchenTemplate_create'
 _create_event = None
 _pending_count = 0
+_pending_type = ''
 _persistent_handlers = []
 
 
@@ -113,9 +115,16 @@ def command_created(args: adsk.core.CommandCreatedEventArgs):
     inputs = args.command.commandInputs
 
     try:
-        args.command.setDialogInitialSize(420, 280)
+        args.command.setDialogInitialSize(420, 320)
     except Exception:
         pass
+
+    kind = inputs.addDropDownCommandInput(TYPE_ID, 'Project type',
+                                          adsk.core.DropDownStyles.TextListDropDownStyle)
+    chosen = kitchen_data.default_project_type()
+    for t in kitchen_data.project_types():
+        kind.listItems.add(t, t == chosen, '')
+    kind.tooltip = 'Which kind of project these spare kitchens are for.'
 
     count = inputs.addIntegerSpinnerCommandInput(COUNT_ID, 'How many', 1, MAX_BATCH, 1, 1)
     count.tooltip = ('How many spares to prepare. Each one takes a few minutes to '
@@ -128,22 +137,34 @@ def command_created(args: adsk.core.CommandCreatedEventArgs):
             box.isFullWidth = True
         except Exception:
             pass
-    info.formattedText = _setup_summary()
-    _update_preview(inputs)
+    _refresh(inputs)
 
     futil.add_handler(args.command.execute, command_execute, local_handlers=local_handlers)
     futil.add_handler(args.command.inputChanged, command_input_changed, local_handlers=local_handlers)
     futil.add_handler(args.command.destroy, command_destroy, local_handlers=local_handlers)
 
 
-def _setup_summary():
+def _selected_type(inputs):
+    item = inputs.itemById(TYPE_ID).selectedItem
+    return item.name if item else ''
+
+
+def _refresh(inputs):
+    project_type = _selected_type(inputs)
+    root, root_error = kitchen_data.kitchens_root(project_type)
+    inputs.itemById(INFO_ID).formattedText = _setup_summary(project_type, root, root_error)
+    _update_preview(inputs, root, root_error)
+
+
+def _setup_summary(project_type, root, root_error):
     """Tick / cross for the two configured locations, so a name that has drifted
     on the cloud is obvious before anyone commits to a long copy."""
     lines = []
-    root, root_error = kitchen_data.kitchens_root()
-    where = config.KITCHENS_PROJECT_NAME + (
-        f' / {config.KITCHENS_FOLDER_NAME}' if config.KITCHENS_FOLDER_NAME else '')
-    lines.append(_status_line('Kitchens', where, root is not None))
+    hub = kitchen_data.active_hub_name()
+    if hub:
+        lines.append(f'<b>Hub:</b> {hub}')
+    lines.append(_status_line('Kitchens', kitchen_data.kitchens_where(project_type),
+                              root is not None))
 
     source, source_error = kitchen_data.library_source_folder()
     label = config.LIBRARY_SOURCE_FOLDER or '(project root)'
@@ -164,13 +185,15 @@ def _status_line(label, value, ok):
 
 
 def command_input_changed(args: adsk.core.InputChangedEventArgs):
-    if args.input.id == COUNT_ID:
-        _update_preview(args.input.parentCommand.commandInputs)
+    inputs = args.input.parentCommand.commandInputs
+    if args.input.id == TYPE_ID:
+        _refresh(inputs)
+    elif args.input.id == COUNT_ID:
+        _update_preview(inputs, *kitchen_data.kitchens_root(_selected_type(inputs)))
 
 
-def _update_preview(inputs):
+def _update_preview(inputs, root, error):
     preview = inputs.itemById(PREVIEW_ID)
-    root, error = kitchen_data.kitchens_root()
     if not root:
         preview.formattedText = f"<i>{error}</i>"
         return
@@ -190,8 +213,7 @@ def _update_preview(inputs):
     if count > len(names):
         shown += f' … (+{count - len(names)} more)'
 
-    where = config.KITCHENS_PROJECT_NAME + (
-        f' / {config.KITCHENS_FOLDER_NAME}' if config.KITCHENS_FOLDER_NAME else '')
+    where = kitchen_data.kitchens_where(_selected_type(inputs))
     waiting = len(kitchen_data.template_folders(root))
     preview.formattedText = (
         f"<b>Will create in</b> {where}<br>{shown}<br>"
@@ -200,8 +222,11 @@ def _update_preview(inputs):
 
 def command_execute(args: adsk.core.CommandEventArgs):
     futil.log(f'{CMD_NAME} Command Execute Event')
-    global _pending_count
-    _pending_count = int(args.command.commandInputs.itemById(COUNT_ID).value or 0)
+    global _pending_count, _pending_type
+    inputs = args.command.commandInputs
+    _pending_count = int(inputs.itemById(COUNT_ID).value or 0)
+    _pending_type = _selected_type(inputs)
+    kitchen_data.remember_project_type(_pending_type)
     if _pending_count > 0:
         app.fireCustomEvent(CREATE_EVENT_ID)
 
@@ -222,14 +247,14 @@ def _on_create_event(args: adsk.core.CustomEventArgs):
     if count < 1:
         return
     try:
-        _build_templates(count)
+        _build_templates(count, _pending_type)
     except Exception:
         futil.log(f'{CMD_NAME}: {traceback.format_exc()}')
         ui.messageBox(f'Create Kitchen Template failed:\n{traceback.format_exc()}', CMD_NAME)
 
 
-def _build_templates(count):
-    root, error = kitchen_data.kitchens_root()
+def _build_templates(count, project_type):
+    root, error = kitchen_data.kitchens_root(project_type)
     if not root:
         ui.messageBox(error, CMD_NAME)
         return
@@ -266,7 +291,8 @@ def _build_templates(count):
     finally:
         progress_dialog.hide()
 
-    _report(built, failures, copy_failures, cancelled=progress_dialog.wasCancelled)
+    _report(built, failures, copy_failures, cancelled=progress_dialog.wasCancelled,
+            where=kitchen_data.kitchens_where(project_type))
 
 
 def _build_one(root, source, name, progress_dialog, done_before):
@@ -287,12 +313,12 @@ def _build_one(root, source, name, progress_dialog, done_before):
     return None if report['cancelled'] else report
 
 
-def _report(built, failures, copy_failures, cancelled):
+def _report(built, failures, copy_failures, cancelled, where):
     lines = []
     if built:
         names = ', '.join(name for name, _ in built)
         cabinets = built[0][1] if built else 0
-        lines.append(f'{len(built)} template(s) ready: {names}')
+        lines.append(f'{len(built)} template(s) ready in {where}: {names}')
         lines.append(f'{cabinets} cabinet file(s) copied into each.')
         lines.append('Run New Kitchen to turn one into a customer job.')
     else:

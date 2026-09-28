@@ -40,6 +40,10 @@ TWO SAFETY NETS, because this deletes cloud files:
   that someone has open. Anything that refuses is reported as kept, not as an
   error — so even a wrong answer from the reference scan can't orphan a cabinet.
 
+NO PROJECT-TYPE CHOICE: the open design already lives in ``Projects / B2B /
+Kitchen / …`` or ``Projects / B2C / Kitchen / …``, so the type is read off its
+folder and shown in the dialog. Asking would only let someone pick the wrong one.
+
 The design must be SAVED first: the cloud decides what is referenced from the
 saved version, so a cabinet placed but not yet saved would look unused.
 """
@@ -147,7 +151,8 @@ def _scan_kitchen():
     used = kitchen_data.referenced_file_ids(document)
     rows = kitchen_data.unused_files(library, used)
     return {'library': library, 'rows': rows, 'used': used, 'how': how,
-            'customer': kitchen_data.kitchen_customer(document) or ''}
+            'customer': kitchen_data.kitchen_customer(document) or '',
+            'project_type': kitchen_data.project_type_of(document)}
 
 
 # ---------------------------------------------------------------------------
@@ -188,6 +193,14 @@ def _summary_html(scan):
     rows = scan['rows']
     used = len(scan['used'])
     header = (f"Kitchen: <b>{scan['customer']}</b><br>" if scan['customer'] else '')
+    if scan.get('project_type'):
+        header += (f"Project: <b>{scan['project_type']}</b> &nbsp;"
+                   f"<font color='#777777'>"
+                   f"{kitchen_data.kitchens_where(scan['project_type'])}</font><br>")
+    else:
+        types = ' / '.join(kitchen_data.project_types())
+        header += (f"<font color='#777777'>Project: not inside a {types} kitchen "
+                   f"folder.</font><br>")
     header += (f"Library: <b>{scan['library'].name}</b> &nbsp;&mdash;&nbsp; "
                f"{used} file(s) referenced by this design.<br>")
 

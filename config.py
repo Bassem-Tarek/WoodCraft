@@ -94,35 +94,55 @@ KITCHEN_PROJECT_PANEL_NAME = 'Kitchen Project'
 # ---------------------------------------------------------------------------
 # Kitchen jobs — where customer kitchens and the cabinet library live
 # ---------------------------------------------------------------------------
-# The shape on the cloud:
+# The shape on the cloud (Saudi Emaar Factory hub):
 #
-#   <KITCHENS_PROJECT_NAME>            project, e.g. "Clients"
-#   └── <KITCHENS_FOLDER_NAME>/        e.g. "Kitchens"
-#       ├── Kitchen Template 1/        made by Create Kitchen Template
-#       │   ├── Kitchen Template 1     hybrid design
-#       │   └── <KITCHEN_LIBRARY_FOLDER_NAME>/   copy of the master library
-#       └── Al Rashid_Kitchen_2026-09-09/   a template New Kitchen has renamed
-#           ├── Al Rashid_Kitchen_2026-09-09
-#           └── <KITCHEN_LIBRARY_FOLDER_NAME>/
+#   <KITCHENS_PROJECT_NAME>                project, "Projects"
+#   ├── B2B/                               one folder per KITCHEN_PROJECT_TYPES
+#   │   └── <KITCHENS_FOLDER_NAME>/        "Kitchen"
+#   │       ├── Kitchen Template 1/        made by Create Kitchen Template
+#   │       │   ├── Kitchen Template 1     hybrid design
+#   │       │   └── <KITCHEN_LIBRARY_FOLDER_NAME>/   copy of the master library
+#   │       └── Al Rashid_Kitchen_2026-09-09/   a template New Kitchen has renamed
+#   │           ├── Al Rashid_Kitchen_2026-09-09
+#   │           └── <KITCHEN_LIBRARY_FOLDER_NAME>/
+#   └── B2C/
+#       └── Kitchen/                       same layout, its own spare templates
 #
 # Create Kitchen Template does the slow work (folders + copying the library) up
 # front, so templates can be stocked in a quiet moment. New Kitchen then just
 # RENAMES a waiting template folder and its design — instant, no copying — and
 # Finish Kitchen later deletes whatever of the library copy went unused.
 #
+# B2B and B2C each keep their OWN pool of spare templates: Create Kitchen Template
+# and New Kitchen both ask which one, and New Kitchen only ever claims a template
+# from the type you picked. Finish Kitchen needs no choice — it reads the type off
+# the folder the open design lives in.
+#
 # Every name below is the EXACT display name as it appears in the Data Panel. If
-# something is renamed on the cloud, change it here: both dialogs show a red
-# cross beside anything they can't find, and list the projects they can see.
-KITCHENS_PROJECT_NAME = 'Clients'
+# something is renamed on the cloud, change it here: the dialogs show a red cross
+# beside anything they can't find, and list the projects they can see.
+KITCHENS_PROJECT_NAME = 'Projects'
 
-# The folder inside that project which holds the kitchen/template folders. Set
-# to '' to put them straight in the project root. Created if it doesn't exist.
-KITCHENS_FOLDER_NAME = 'Kitchens'
+# The project-type folders at the root of that project, in dropdown order. Add a
+# name here (and the folder on the cloud) to offer another type. The folders are
+# NOT created automatically — a typo should be reported, not silently created.
+KITCHEN_PROJECT_TYPES = ('B2B', 'B2C')
+
+# The folder inside each project-type folder which holds the kitchen/template
+# folders. Set to '' to put them straight in the type folder. Created if missing.
+KITCHENS_FOLDER_NAME = 'Kitchen'
+
+# Only look for these projects in the hub (team) that is active in Fusion right
+# now. The user can see several hubs (Kemet, Channel Partners, …) and a "Projects"
+# or "Library" project in the wrong one must never receive a customer's kitchen.
+# Switch hubs in Fusion to work in another one.
+KITCHEN_ACTIVE_HUB_ONLY = True
 
 # The master library Create Kitchen Template copies FROM: a folder inside a
-# project. Set LIBRARY_SOURCE_FOLDER to '' to copy the whole project root.
-LIBRARY_PROJECT_NAME = 'Emaar Library'
-LIBRARY_SOURCE_FOLDER = 'Kitchen Library'
+# project. Set LIBRARY_SOURCE_FOLDER to '' to copy the whole project root. The
+# same library serves B2B and B2C.
+LIBRARY_PROJECT_NAME = 'Library'
+LIBRARY_SOURCE_FOLDER = 'Kitchen'
 
 # What the per-kitchen copy of the library is called inside the job folder.
 KITCHEN_LIBRARY_FOLDER_NAME = 'Library'
@@ -134,7 +154,7 @@ KITCHEN_TEMPLATE_PREFIX = 'Kitchen Template'
 
 # What New Kitchen renames a template to. {customer} is what the designer typed,
 # {date} is today in KITCHEN_DATE_FORMAT; the literal "Kitchen" in the middle says
-# what kind of job this is, so a Clients folder can hold other project types later
+# what kind of job this is, so a project folder can hold other job kinds later
 # without the names becoming ambiguous.
 #
 # A dangling separator is trimmed automatically, so an empty KITCHEN_DATE_FORMAT

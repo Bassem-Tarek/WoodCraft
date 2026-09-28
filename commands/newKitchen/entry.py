@@ -15,14 +15,16 @@
 
 """New Kitchen — start a customer's kitchen.
 
-Type the customer's name and OK. The kitchen ends up at
-``Clients / Kitchens / <Customer>_Kitchen_<date>``, holding a design of the same
+Pick the project type (B2B or B2C), type the customer's name and OK. The kitchen
+ends up at ``Projects / <type> / Kitchen / <Customer>_Kitchen_<date>`` in the hub
+open in Fusion, holding a design of the same
 name and its own ``Library`` copy of the cabinet catalogue, and the design opens
 ready to work in.
 
 TWO ROUTES TO THE SAME RESULT, and the designer shouldn't have to care which:
 
-* **A template is waiting** (the normal case) — rename it. The folder AND the
+* **A template is waiting** in that type's Kitchen folder (the normal case) —
+  rename it. B2B and B2C keep separate pools of spares. The folder AND the
   design inside it are renamed, and that's the whole operation: two metadata
   writes, instant.
 
@@ -81,6 +83,7 @@ TAB_NAME = config.KITCHEN_TAB_NAME
 
 ICON_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'resources', '')
 
+TYPE_ID = 'nk_type'
 CUSTOMER_ID = 'nk_customer'
 OPEN_ID = 'nk_open'
 PREVIEW_ID = 'nk_preview'
@@ -90,9 +93,10 @@ local_handlers = []
 
 START_EVENT_ID = f'{config.COMPANY_NAME}_newKitchen_start'
 _start_event = None
-_pending = None            # {'row': template dict or None, 'customer', 'open'}
+_pending = None            # {'row', 'customer', 'open', 'root', 'source', 'where'}
 _template = None           # the template this dialog will claim, if any
 _waiting = 0
+_project_type = ''
 _root = None
 _root_error = None
 _source = None             # master library — only resolved for the build fallback
@@ -134,21 +138,17 @@ def command_created(args: adsk.core.CommandCreatedEventArgs):
     inputs = args.command.commandInputs
 
     try:
-        args.command.setDialogInitialSize(430, 260)
+        args.command.setDialogInitialSize(430, 300)
     except Exception:
         pass
 
-    global _template, _waiting, _root, _root_error, _source, _source_error
-    _root, _root_error = kitchen_data.kitchens_root()
-    _template = kitchen_data.latest_template(_root) if _root else None
-    _waiting = len(kitchen_data.template_folders(_root)) if _root else 0
-
-    # Only look up the master library when it's actually needed — the normal
-    # (template) path never touches it, and it's a network round trip.
-    if _root and not _template:
-        _source, _source_error = kitchen_data.library_source_folder()
-    else:
-        _source, _source_error = None, None
+    kind = inputs.addDropDownCommandInput(TYPE_ID, 'Project type',
+                                          adsk.core.DropDownStyles.TextListDropDownStyle)
+    chosen = kitchen_data.default_project_type()
+    for t in kitchen_data.project_types():
+        kind.listItems.add(t, t == chosen, '')
+    kind.tooltip = 'Which kind of project this kitchen is — it is filed under that folder.'
+    _resolve(chosen)
 
     name_box = inputs.addStringValueInput(CUSTOMER_ID, 'Customer name', '')
     name_box.tooltip = 'Names the kitchen folder and the design inside it.'
@@ -174,17 +174,39 @@ def command_created(args: adsk.core.CommandCreatedEventArgs):
     futil.add_handler(args.command.destroy, command_destroy, local_handlers=local_handlers)
 
 
+def _resolve(project_type):
+    """Look up the kitchens folder, the template to claim and (only if needed)
+    the master library for one project type."""
+    global _project_type, _template, _waiting, _root, _root_error, _source, _source_error
+    _project_type = project_type or ''
+    _root, _root_error = kitchen_data.kitchens_root(_project_type)
+    _template = kitchen_data.latest_template(_root) if _root else None
+    _waiting = len(kitchen_data.template_folders(_root)) if _root else 0
+
+    # Only look up the master library when it's actually needed — the normal
+    # (template) path never touches it, and it's a network round trip.
+    if _root and not _template:
+        _source, _source_error = kitchen_data.library_source_folder()
+    else:
+        _source, _source_error = None, None
+
+
 def _can_run():
     """A kitchen can be started either way: from a template, or built fresh."""
     return bool(_root and (_template or _source))
 
 
 def _where():
-    return config.KITCHENS_PROJECT_NAME + (
-        f' / {config.KITCHENS_FOLDER_NAME}' if config.KITCHENS_FOLDER_NAME else '')
+    return kitchen_data.kitchens_where(_project_type)
 
 
 def _setup_summary():
+    hub = kitchen_data.active_hub_name()
+    body = _setup_body()
+    return f'<b>Hub:</b> {hub}<br>{body}' if hub else body
+
+
+def _setup_body():
     if not _root:
         return f"<font color='#d1242f'><b>{_root_error}</b></font>"
 
@@ -210,8 +232,15 @@ def _setup_summary():
 
 
 def command_input_changed(args: adsk.core.InputChangedEventArgs):
-    if args.input.id == CUSTOMER_ID:
-        _update_preview(args.input.parentCommand.commandInputs)
+    inputs = args.input.parentCommand.commandInputs
+    if args.input.id == TYPE_ID:
+        item = args.input.selectedItem
+        _resolve(item.name if item else '')
+        inputs.itemById(OPEN_ID).isVisible = _can_run()
+        inputs.itemById(INFO_ID).formattedText = _setup_summary()
+        _update_preview(inputs)
+    elif args.input.id == CUSTOMER_ID:
+        _update_preview(inputs)
 
 
 def _update_preview(inputs):
@@ -244,7 +273,9 @@ def command_execute(args: adsk.core.CommandEventArgs):
         return
     global _pending
     _pending = {'row': _template, 'customer': customer,
-                'open': inputs.itemById(OPEN_ID).value}
+                'open': inputs.itemById(OPEN_ID).value,
+                'root': _root, 'source': _source, 'where': _where()}
+    kitchen_data.remember_project_type(_project_type)
     app.fireCustomEvent(START_EVENT_ID)
 
 
@@ -267,7 +298,7 @@ def _on_start_event(args: adsk.core.CustomEventArgs):
         # The name is worked out here, not when the dialog opened, so a kitchen
         # someone else created in between can't be collided with.
         name = kitchen_data.unique_folder_name(
-            _root, kitchen_data.kitchen_folder_name(job['customer']))
+            job['root'], kitchen_data.kitchen_folder_name(job['customer']))
         if job['row']:
             _from_template(job, name)
         else:
@@ -285,7 +316,7 @@ def _from_template(job, name):
         ui.messageBox(warning, CMD_NAME)
         return
 
-    lines = [f'{name} is ready in {_where()}.']
+    lines = [f"{name} is ready in {job['where']}."]
     if warning:
         lines.append(warning)
     if job['open'] and row['design']:
@@ -297,7 +328,7 @@ def _from_scratch(job, name):
     """The fallback: build the kitchen the way Create Kitchen Template would,
     straight under the customer's name."""
     customer = job['customer']
-    total = max(1, kitchen_data.count_files(_source))
+    total = max(1, kitchen_data.count_files(job['source']))
 
     progress_dialog = ui.createProgressDialog()
     progress_dialog.isCancelButtonShown = True
@@ -313,7 +344,8 @@ def _from_scratch(job, name):
         return not progress_dialog.wasCancelled
 
     try:
-        report = kitchen_build.build_kitchen(_root, _source, name, customer=customer,
+        report = kitchen_build.build_kitchen(job['root'], job['source'], name,
+                                             customer=customer,
                                              progress=on_progress,
                                              keep_open=job['open'])
     finally:
@@ -330,7 +362,7 @@ def _from_scratch(job, name):
                       f"Check it in the Data Panel.", CMD_NAME)
         return
 
-    lines = [f'{name} is ready in {_where()}.',
+    lines = [f"{name} is ready in {job['where']}.",
              f"{report['copied']} cabinet(s) copied into its library."]
     if report['failed']:
         lines.append(f"{len(report['failed'])} could not be copied.")

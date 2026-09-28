@@ -56,20 +56,30 @@ book-end the design.
 The shape on the cloud:
 
 ```
-Clients/                              ← KITCHENS_PROJECT_NAME (project)
-└── Kitchens/                         ← KITCHENS_FOLDER_NAME
-    ├── Kitchen Template 1/           ← a spare, waiting
-    │   ├── Kitchen Template 1        ← hybrid design
-    │   └── Library/                  ← copy of Emaar Library / Kitchen Library
-    └── Al Rashid_Kitchen_2026-09-09/ ← a template New Kitchen has renamed
-        ├── Al Rashid_Kitchen_2026-09-09
-        └── Library/
+Projects/                                 ← KITCHENS_PROJECT_NAME (project, active hub)
+├── B2B/                                  ← one of KITCHEN_PROJECT_TYPES
+│   └── Kitchen/                          ← KITCHENS_FOLDER_NAME
+│       ├── Kitchen Template 1/           ← a spare, waiting
+│       │   ├── Kitchen Template 1        ← hybrid design
+│       │   └── Library/                  ← copy of Library / Kitchen
+│       └── Al Rashid_Kitchen_2026-09-09/ ← a template New Kitchen has renamed
+│           ├── Al Rashid_Kitchen_2026-09-09
+│           └── Library/
+└── B2C/
+    └── Kitchen/                          ← same layout, its own spares
 ```
+
+Create Kitchen Template and New Kitchen both have a **Project type** dropdown
+(B2B / B2C, remembered between runs); each type keeps its own pool of spare
+templates. Finish Kitchen reads the type off the open design's folder. Projects
+are only looked up in the **hub open in Fusion right now**
+(`KITCHEN_ACTIVE_HUB_ONLY`), so a same-named project in another team is never
+touched.
 
 | Command | What it does |
 |---|---|
-| **Create Kitchen Template** | Builds a spare: a folder **`Kitchen Template <n>`** under `Clients/Kitchens` holding a **`Library`** sub-folder — a full copy of the master cabinet library (`LIBRARY_PROJECT_NAME` / `LIBRARY_SOURCE_FOLDER`, default **Emaar Library / Kitchen Library**), sub-folders and all — plus a new **hybrid** design named after the folder, saved and closed. No customer is asked for, because there isn't one yet: **that is the point.** Copying a library is slow and network-bound, so templates get stocked in a quiet moment. Build several at once with the **How many** spinner. The number is the **lowest unused** one, not the highest plus one — templates are consumed by being renamed, so gaps open constantly and filling them keeps the numbers small. |
-| **New Kitchen** | Type the customer's name and you get `Clients/Kitchens/<Customer>_Kitchen_<date>` — a design of that name plus its own `Library` copy — opened ready to work in. Two routes to that same result, and the designer needn't care which: if a template is **waiting**, it renames it (folder *and* design), which is two metadata writes and therefore instant; if **nothing is waiting**, it builds the kitchen from scratch exactly as Create Kitchen Template would, straight under the customer's name. The fallback matters because "no templates available" is a dead end at the worst possible moment — a fresh install, or a busy week that drained the spares — so the dialog just says this one will take a few minutes and suggests stocking up afterwards. Both routes produce an identical folder with identical stamps, so nothing downstream can tell them apart. There's deliberately **no template picker**: templates are interchangeable, so choosing would be a question with no wrong answer. The literal "Kitchen" in the name marks the job type, so the Clients project can hold other kinds of project later without the names turning ambiguous. |
+| **Create Kitchen Template** | Builds a spare: a folder **`Kitchen Template <n>`** under `Projects/<B2B|B2C>/Kitchen` holding a **`Library`** sub-folder — a full copy of the master cabinet library (`LIBRARY_PROJECT_NAME` / `LIBRARY_SOURCE_FOLDER`, default **Library / Kitchen**), sub-folders and all — plus a new **hybrid** design named after the folder, saved and closed. No customer is asked for, because there isn't one yet: **that is the point.** Copying a library is slow and network-bound, so templates get stocked in a quiet moment. Build several at once with the **How many** spinner. The number is the **lowest unused** one, not the highest plus one — templates are consumed by being renamed, so gaps open constantly and filling them keeps the numbers small. |
+| **New Kitchen** | Type the customer's name and you get `Projects/<B2B|B2C>/Kitchen/<Customer>_Kitchen_<date>` — a design of that name plus its own `Library` copy — opened ready to work in. Two routes to that same result, and the designer needn't care which: if a template is **waiting**, it renames it (folder *and* design), which is two metadata writes and therefore instant; if **nothing is waiting**, it builds the kitchen from scratch exactly as Create Kitchen Template would, straight under the customer's name. The fallback matters because "no templates available" is a dead end at the worst possible moment — a fresh install, or a busy week that drained the spares — so the dialog just says this one will take a few minutes and suggests stocking up afterwards. Both routes produce an identical folder with identical stamps, so nothing downstream can tell them apart. There's deliberately **no template picker**: templates are interchangeable, so choosing would be a question with no wrong answer. The literal "Kitchen" in the name marks the job type, so the project can hold other kinds of project later without the names turning ambiguous. |
 | **Finish Kitchen** | Run it on the finished design: it clears every file in that kitchen's **`Library`** the design doesn't reference, and prunes the sub-folders that leaves empty — what survives is exactly the cabinets in this kitchen. **Used means referenced at any depth**, so a placed cabinet's own hardware is safe too. It lists everything it is about to delete *before* you press OK, and Fusion's own `deleteMe()` refuses any file still referenced or open — those are reported as **kept**, so even a wrong answer from the reference scan can't orphan a cabinet. Deleted files land in the project's deleted items and can be restored from the Data Panel. |
 
 > **Guards worth knowing about**
@@ -101,7 +111,7 @@ Clients/                              ← KITCHENS_PROJECT_NAME (project)
 > what it clears goes to the project's deleted items and can be restored.
 >
 > **Changing the names** (they will change): constants at the top of
-> [`config.py`](config.py) — `KITCHENS_PROJECT_NAME`, `KITCHENS_FOLDER_NAME`
+> [`config.py`](config.py) — `KITCHENS_PROJECT_NAME`, `KITCHEN_PROJECT_TYPES`, `KITCHENS_FOLDER_NAME`
 > (empty = straight in the project root), `LIBRARY_PROJECT_NAME`,
 > `LIBRARY_SOURCE_FOLDER` (empty = copy the whole project),
 > `KITCHEN_LIBRARY_FOLDER_NAME`, `KITCHEN_TEMPLATE_PREFIX`,
