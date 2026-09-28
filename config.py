@@ -118,6 +118,10 @@ KITCHEN_PROJECT_PANEL_NAME = 'Kitchen Project'
 # from the type you picked. Finish Kitchen needs no choice — it reads the type off
 # the folder the open design lives in.
 #
+# These names are the DEFAULTS. The Folders Selection command can point the
+# kitchens folder of each project type, and the master library, at any folder in
+# any hub instead — its choice (stored by id in folders.json) wins over these.
+#
 # Every name below is the EXACT display name as it appears in the Data Panel. If
 # something is renamed on the cloud, change it here: the dialogs show a red cross
 # beside anything they can't find, and list the projects they can see.
@@ -179,8 +183,9 @@ KITCHEN_MAX_LISTED = 200
 # The Insert Hardware command reads its catalogue from a dedicated Fusion cloud
 # project whose top-level folders are the hardware categories (e.g. "Hinges",
 # "Connectors", "Dowels") and whose files are the individual hardware parts.
-# Set this to the EXACT display name of that project. If the command can't find
-# it, the dialog lists the projects it CAN see so you can copy the right name.
+# Set this to the EXACT display name of that project. This is only the default:
+# the Folders Selection command can point Insert Hardware (and Fit Handles) at any
+# folder in any hub (tenant), and that choice wins over this name.
 HARDWARE_PROJECT_NAME = 'WoodCraft Hardware'
 
 # ---------------------------------------------------------------------------
@@ -354,4 +359,4 @@ WC_KITCHEN_CREATED = 'kitchenCreated'
 WC_KITCHEN_LIB_FOLDER = 'kitchenLibraryFolderId'
 
 # Future keys plug in here with no core change, e.g.:
-#   WC_PART_NO = 'partNumber'
+#   WC_PART_NO = 'partNumber'

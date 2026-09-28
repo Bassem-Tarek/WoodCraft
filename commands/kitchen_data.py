@@ -55,6 +55,7 @@ import re
 import adsk.core
 
 from .. import config
+from . import folder_store
 
 app = adsk.core.Application.get()
 
@@ -137,15 +138,35 @@ def active_hub_name():
         return ''
 
 
+_project_cache = {}     # (active hub id, project name) -> DataProject
+
+
 def find_project(project_name):
     """The named cloud project in the active hub (and, only when
-    KITCHEN_ACTIVE_HUB_ONLY is off, any other hub). Returns None if not found."""
+    KITCHEN_ACTIVE_HUB_ONLY is off, any other hub). Returns None if not found.
+
+    Cached per active hub for the session: listing a hub's projects is a network
+    round trip, and every Kitchen dialog asks for the same one or two projects
+    over and over (once per dropdown change)."""
+    try:
+        hub_id = app.data.activeHub.id
+    except Exception:
+        hub_id = ''
+    key = (hub_id, project_name)
+    cached = _project_cache.get(key)
+    if cached is not None:
+        try:
+            if cached.isValid:
+                return cached
+        except Exception:
+            return cached
     for hub in _hubs_to_search():
         try:
             found = _project_in_hub(hub, project_name)
         except Exception:
             found = None
         if found:
+            _project_cache[key] = found
             return found
     return None
 
@@ -205,9 +226,15 @@ def subfolder_by_name(folder, name):
 def library_source_folder():
     """(folder, error) for the cabinet library New Kitchen copies FROM.
 
+    The folder picked in Folders Selection wins. Otherwise
     config.LIBRARY_SOURCE_FOLDER names a folder inside config.LIBRARY_PROJECT_NAME;
     leave it empty to copy the whole project root instead. `error` is a
     ready-to-show sentence when the folder can't be resolved."""
+    configured, folder = folder_store.resolve('library')
+    if configured:
+        if folder is None:
+            return None, folder_store.missing_message('library')
+        return folder, None
     project = find_project(config.LIBRARY_PROJECT_NAME)
     if not project:
         return None, _not_found(f"Library project '{config.LIBRARY_PROJECT_NAME}'",
@@ -224,14 +251,44 @@ def library_source_folder():
     return folder, None
 
 
-def unique_folder_name(parent, name):
+def library_where():
+    """Display text for the master library location."""
+    sel = folder_store.get('library')
+    if sel:
+        return folder_store.describe(sel)
+    label = config.LIBRARY_SOURCE_FOLDER or '(project root)'
+    return f'{config.LIBRARY_PROJECT_NAME} / {label}'
+
+
+def child_folder_names(parent):
+    """Lower-cased names of every direct sub-folder of `parent` — ONE listing,
+    so a dialog can test many candidate names without a round trip each."""
+    names = set()
+    try:
+        folders = parent.dataFolders
+        for i in range(folders.count):
+            try:
+                names.add(folders.item(i).name.strip().lower())
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return names
+
+
+def unique_folder_name(parent, name, taken=None):
     """`name` if free inside `parent`, else 'name (2)', 'name (3)', … Two kitchens
-    for the same customer on the same day must not collide."""
-    if not subfolder_by_name(parent, name):
+    for the same customer on the same day must not collide.
+
+    `taken` (from child_folder_names) lets a dialog re-check on every keystroke
+    without listing the folder again; without it the folder is listed once."""
+    if taken is None:
+        taken = child_folder_names(parent)
+    if name.strip().lower() not in taken:
         return name
     for n in range(2, 100):
         candidate = f'{name} ({n})'
-        if not subfolder_by_name(parent, candidate):
+        if candidate.strip().lower() not in taken:
             return candidate
     return f'{name} ({datetime.datetime.now().strftime("%H%M%S")})'
 
@@ -249,7 +306,11 @@ def project_types():
 
 
 def kitchens_where(project_type):
-    """'Projects / B2B / Kitchen' — the display path of a type's kitchens folder."""
+    """'Projects / B2B / Kitchen' — the display path of a type's kitchens folder
+    (or the folder picked for it in Folders Selection)."""
+    sel = folder_store.get(folder_store.kitchens_key(project_type))
+    if sel:
+        return folder_store.describe(sel)
     parts = [config.KITCHENS_PROJECT_NAME, project_type, config.KITCHENS_FOLDER_NAME]
     return ' / '.join(p for p in parts if p)
 
@@ -261,7 +322,15 @@ def kitchens_root(project_type):
 
     The innermost Kitchen folder is CREATED if it's missing, but the project and
     the type folder are never created: a wrong name should be reported, not
-    silently worked around."""
+    silently worked around.
+
+    A folder picked for the type in Folders Selection is used as-is instead."""
+    key = folder_store.kitchens_key(project_type)
+    configured, picked = folder_store.resolve(key)
+    if configured:
+        if picked is None:
+            return None, folder_store.missing_message(key)
+        return picked, None
     project = find_project(config.KITCHENS_PROJECT_NAME)
     if not project:
         return None, _not_found(f"Project '{config.KITCHENS_PROJECT_NAME}'",
@@ -324,6 +393,12 @@ def project_type_of(document):
     types = {t.lower(): t for t in project_types()}
     if not types:
         return ''
+    # Folders picked in Folders Selection are recognised by id.
+    by_id = {}
+    for t in types.values():
+        sel = folder_store.get(folder_store.kitchens_key(t))
+        if sel and sel.get('folder_id'):
+            by_id[sel['folder_id']] = t
     try:
         folder = document.dataFile.parentFolder
     except Exception:
@@ -332,6 +407,10 @@ def project_type_of(document):
         if not folder:
             break
         try:
+            if by_id:
+                match = by_id.get(folder.id)
+                if match:
+                    return match
             match = types.get(folder.name.strip().lower())
             if match:
                 return match
@@ -354,13 +433,18 @@ def _template_number(folder_name):
     return int(match.group(1)) if match else None
 
 
-def template_folders(root):
+def template_folders(root, details=True):
     """Every waiting template in `root`, lowest number first, as dicts:
-    {'folder', 'number', 'name', 'design', 'cabinets'}.
+    {'folder', 'number', 'name'} plus, with details=True, 'design' and
+    'cabinets'.
 
     `design` is the design DataFile sitting directly in the template folder (None
     if someone deleted it); `cabinets` counts the files in its Library copy so the
-    New Kitchen dialog can show a template is actually stocked."""
+    New Kitchen dialog can show a template is actually stocked.
+
+    details=False lists only the folder names — ONE network call instead of
+    several per template (and a whole library walk each). Use it wherever only
+    the numbers or the count are needed."""
     out = []
     if not root:
         return out
@@ -373,21 +457,42 @@ def template_folders(root):
     for i in range(count):
         try:
             folder = folders.item(i)
-            number = _template_number(folder.name)
+            name = folder.name
+            number = _template_number(name)
         except Exception:
             continue
         if number is None:
             continue
-        library = subfolder_by_name(folder, config.KITCHEN_LIBRARY_FOLDER_NAME)
-        out.append({
-            'folder': folder,
-            'number': number,
-            'name': folder.name,
-            'design': design_file_in(folder),
-            'cabinets': count_files(library) if library else 0,
-        })
+        row = {'folder': folder, 'number': number, 'name': name}
+        if details:
+            _add_details(row)
+        out.append(row)
     out.sort(key=lambda row: row['number'])
     return out
+
+
+def _add_details(row):
+    library = subfolder_by_name(row['folder'], config.KITCHEN_LIBRARY_FOLDER_NAME)
+    row['design'] = design_file_in(row['folder'])
+    row['cabinets'] = count_files(library) if library else 0
+    return row
+
+
+def has_files(folder, _depth=0):
+    """True as soon as ANY file is found in the tree — stops at the first one
+    instead of counting the whole library."""
+    if not folder or _depth > config.KITCHEN_MAX_DEPTH:
+        return False
+    try:
+        if folder.dataFiles.count:
+            return True
+        subs = folder.dataFolders
+        for i in range(subs.count):
+            if has_files(subs.item(i), _depth + 1):
+                return True
+    except Exception:
+        pass
+    return False
 
 
 def _created_at(data_file):
@@ -398,7 +503,7 @@ def _created_at(data_file):
         return 0
 
 
-def latest_template(root):
+def latest_template(root, rows=None):
     """The template New Kitchen will claim: the most recently built one.
 
     Newest by the design's creation date, because template NUMBERS are reused as
@@ -407,23 +512,39 @@ def latest_template(root):
 
     Templates whose Library is empty (a copy that was cancelled part-way) are
     skipped while any stocked one exists, so a half-built spare doesn't get handed
-    to a customer. Returns None when nothing is waiting."""
-    rows = template_folders(root)
+    to a customer. Returns None when nothing is waiting.
+
+    Only the chosen template's library is counted in full; the others are just
+    checked for being non-empty, newest first, stopping at the first stocked one.
+    `rows` may be a details=False listing the caller already has."""
+    if rows is None:
+        rows = template_folders(root, details=False)
     if not rows:
         return None
-    usable = [row for row in rows if row['cabinets']] or rows
-    usable.sort(key=lambda row: (_created_at(row['design']), row['number']))
-    return usable[-1]
+    for row in rows:
+        if 'design' not in row:
+            row['design'] = design_file_in(row['folder'])
+    ordered = sorted(rows, key=lambda row: (_created_at(row['design']), row['number']),
+                     reverse=True)
+    for row in ordered:
+        library = subfolder_by_name(row['folder'], config.KITCHEN_LIBRARY_FOLDER_NAME)
+        if library and has_files(library):
+            row['cabinets'] = count_files(library)
+            return row
+    chosen = ordered[0]
+    chosen.setdefault('cabinets', 0)
+    return chosen
 
 
-def next_template_name(root):
+def next_template_name(root, taken=None):
     """The next template name: the LOWEST unused number, not max+1.
 
     Templates are consumed by being renamed, so gaps open up constantly. Filling
     them keeps the numbers small and readable instead of drifting to
     'Kitchen Template 47' after a busy month."""
     prefix = (config.KITCHEN_TEMPLATE_PREFIX or 'Kitchen Template').strip()
-    taken = {row['number'] for row in template_folders(root)}
+    if taken is None:
+        taken = {row['number'] for row in template_folders(root, details=False)}
     number = 1
     while number in taken:
         number += 1

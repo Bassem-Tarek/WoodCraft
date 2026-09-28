@@ -311,6 +311,20 @@ def _face_proxy(face, occ):
         return face
 
 
+def _box(bb):
+    """A BoundingBox3D as a plain (x0, y0, z0, x1, y1, z1) tuple — read once, so
+    the joint test below compares floats instead of making six API calls per
+    face/body pair."""
+    lo, hi = bb.minPoint, bb.maxPoint
+    return (lo.x, lo.y, lo.z, hi.x, hi.y, hi.z)
+
+
+def _boxes_overlap(a, b, tol_cm):
+    return (a[0] - tol_cm <= b[3] and b[0] - tol_cm <= a[3]
+            and a[1] - tol_cm <= b[4] and b[1] - tol_cm <= a[4]
+            and a[2] - tol_cm <= b[5] and b[2] - tol_cm <= a[5])
+
+
 def _bbox_overlaps(a, b, tol_cm):
     return (a.minPoint.x - tol_cm <= b.maxPoint.x and b.minPoint.x - tol_cm <= a.maxPoint.x
             and a.minPoint.y - tol_cm <= b.maxPoint.y and b.minPoint.y - tol_cm <= a.maxPoint.y
@@ -355,21 +369,23 @@ def _touches_another_panel(face_proxy, own_body_token, panel_bodies):
     butt joint, so the edge isn't exposed. Probes points just outside the face:
     inside a neighbour ⇒ joint. Corner-line contact (two exposed edges meeting
     at an arris) probes into empty air, so it correctly stays bandable.
-    Bounding boxes prefilter which bodies pay for containment tests."""
+    Bounding boxes prefilter which bodies pay for containment tests — and when no
+    other panel is even near the face, the probe points are never computed."""
+    try:
+        fbb = _box(face_proxy.boundingBox)
+    except Exception:
+        return False
+    near = [body for token, body, box in panel_bodies
+            if token != own_body_token and box is not None
+            and _boxes_overlap(fbb, box, 2 * PROBE_OFFSET_CM)]
+    if not near:
+        return False
     probes = _outward_probe_points(face_proxy)
     if not probes:
         return False
-    try:
-        fbb = face_proxy.boundingBox
-    except Exception:
-        return False
     inside = adsk.fusion.PointContainment.PointInsidePointContainment
-    for token, body in panel_bodies:
-        if token == own_body_token:
-            continue
+    for body in near:
         try:
-            if not _bbox_overlaps(fbb, body.boundingBox, 2 * PROBE_OFFSET_CM):
-                continue
             for pt in probes:
                 if body.pointContainment(pt) == inside:
                     return True
@@ -410,7 +426,12 @@ def _detect_edge_faces(inputs):
             for bi in range(bodies.count):
                 body = bodies.item(bi)
                 proxy = body if occ is None else (body.createForAssemblyContext(occ) or body)
-                panel_bodies.append((f'{getattr(occ, "fullPathName", "<root>")}#{bi}', proxy))
+                try:
+                    box = _box(proxy.boundingBox)
+                except Exception:
+                    box = None
+                panel_bodies.append((f'{getattr(occ, "fullPathName", "<root>")}#{bi}',
+                                     proxy, box))
         except Exception:
             continue
 
@@ -428,12 +449,34 @@ def _detect_edge_faces(inputs):
     found = 0
     added = 0
     skipped_joints = 0
+    # The same cabinet placed several times shares its components: find each
+    # component's bandable faces (and which body owns them) once, not per placement.
+    face_cache = {}
     for occ, comp in instances:
         own_prefix = f'{getattr(occ, "fullPathName", "<root>")}#'
-        for face in panels.bandable_faces(comp):
+        try:
+            comp_key = comp.id
+        except Exception:
+            comp_key = None
+        # Ids are only a bucket (distinct components can share one — see Set
+        # Finish's _ComponentSet); equality decides.
+        faces = None
+        bucket = face_cache.setdefault(comp_key, []) if comp_key else []
+        for other, other_faces in bucket:
+            try:
+                if other == comp:
+                    faces = other_faces
+                    break
+            except Exception:
+                continue
+        if faces is None:
+            faces = [(face, _body_index(comp, face))
+                     for face in panels.bandable_faces(comp)]
+            bucket.append((comp, faces))
+        for face, body_index in faces:
             found += 1
             proxy = _face_proxy(face, occ)
-            own_token = own_prefix + str(_body_index(comp, face))
+            own_token = own_prefix + str(body_index)
             if exposed_only and _touches_another_panel(proxy, own_token, panel_bodies):
                 skipped_joints += 1
                 continue
@@ -465,9 +508,10 @@ def _body_index(component, face):
     """Index of the body owning `face` within its component (joins the face to
     the panel_bodies token scheme)."""
     try:
+        owner = face.body
         bodies = component.bRepBodies
         for bi in range(bodies.count):
-            if bodies.item(bi) == face.body:
+            if bodies.item(bi) == owner:
                 return bi
     except Exception:
         pass

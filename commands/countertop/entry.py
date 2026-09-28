@@ -67,6 +67,7 @@ import os
 import adsk.core
 import adsk.fusion
 
+from .. import entity_memo
 from .. import ui_helpers
 from .. import wc_attrs
 from .. import countertop_geom as geom
@@ -138,6 +139,7 @@ def command_created(args: adsk.core.CommandCreatedEventArgs):
 
     global _graphics_group
     _graphics_group = None
+    _box_memo.clear()
 
     inputs = args.command.commandInputs
     length_units = app.activeProduct.unitsManager.defaultLengthUnits
@@ -240,8 +242,17 @@ def _occurrence_boxes(occurrence, depth=0):
     return boxes
 
 
+# Measured boxes per selected entity, kept for the life of the dialog so a
+# preview redraw (every input change) doesn't re-walk the same cabinets.
+_box_memo = entity_memo.EntityMemo()
+
+
 def _world_boxes(entity):
-    """World-space bounding boxes for one selected side panel."""
+    """World-space bounding boxes for one selected side panel (memoised)."""
+    return _box_memo.get(entity, _measure_world_boxes)
+
+
+def _measure_world_boxes(entity):
     try:
         if entity.objectType == adsk.fusion.Occurrence.classType():
             return _occurrence_boxes(adsk.fusion.Occurrence.cast(entity))
@@ -398,6 +409,7 @@ def command_preview(args: adsk.core.CommandEventArgs):
         splash_color = adsk.fusion.CustomGraphicsSolidColorEffect.create(
             adsk.core.Color.create(*BACKSPLASH_COLOR))
 
+        lines = entity_memo.LineBatch()
         for piece in pieces:
             color = slab_color if piece['kind'] == 'slab' else splash_color
             low = piece['z']
@@ -406,10 +418,10 @@ def command_preview(args: adsk.core.CommandEventArgs):
 
             # The two rectangles, plus the four verticals joining them.
             for z in (low, high):
-                _add_strip(group, color,
-                           [(x, y, z) for x, y in corners] + [(corners[0][0], corners[0][1], z)])
+                lines.strip(color,
+                            [(x, y, z) for x, y in corners] + [(corners[0][0], corners[0][1], z)])
             for x, y in corners:
-                _add_strip(group, color, [(x, y, low), (x, y, high)])
+                lines.strip(color, [(x, y, low), (x, y, high)])
 
             if piece['kind'] != 'slab':
                 continue
@@ -425,6 +437,7 @@ def command_preview(args: adsk.core.CommandEventArgs):
             text.billBoarding = adsk.fusion.CustomGraphicsBillBoard.create(mid)
             text.color = color
 
+        lines.draw(group, PREVIEW_WEIGHT)
         _graphics_group = group
         app.activeViewport.refresh()
     except Exception:
@@ -607,5 +620,6 @@ def command_destroy(args: adsk.core.CommandEventArgs):
     futil.log(f'{CMD_NAME} Command Destroy Event')
     global local_handlers
     _clear_preview()
+    _box_memo.clear()
     app.activeViewport.refresh()
     local_handlers = []

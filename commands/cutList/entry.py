@@ -70,6 +70,7 @@ UNMATCHED_COLOR = '#c2c2c2'
 local_handlers = []
 # Per-invocation pickers: [{'key': (name_lower, thickness), 'picker_id', 'sheet_names'}].
 _pickers = []
+_dialog_found = None     # panels + hardware read when the dialog opened
 
 
 def start():
@@ -157,11 +158,17 @@ def _build_pickers(inputs, design):
     dropdown for every matched material that has MORE THAN ONE sheet (single-sheet
     and unmatched materials need no choice). Whole-design grouping is a superset of
     any scoped subset, so the pickers cover every group execute might see."""
-    global _pickers
+    global _pickers, _dialog_found
     _pickers = []
 
     materials = sheets_store.load()['materials']
-    groups = _group_instances(panels.collect_panel_instances(design)) if design else []
+    # Panels AND purchased items in one walk, kept for OK: the model can't change
+    # while this dialog is open, so a whole-design report reuses this walk.
+    _dialog_found = (panels.collect_instances(
+        design, categories={config.WC_CAT_PANEL, config.WC_CAT_HARDWARE})
+        if design else [])
+    groups = _group_instances([it for it in _dialog_found
+                               if it['category'] == config.WC_CAT_PANEL]) if design else []
     for g in groups:
         g['mat'] = sheets_store.find_material(materials, g['material'], g['thickness'])
 
@@ -232,15 +239,23 @@ def command_execute(args: adsk.core.CommandEventArgs):
         except Exception:
             report_name = 'WoodCraft'
 
+    # ONE walk of the model collects panels and purchased items together (it used
+    # to walk the design once for each), then they are split by category.
+    wanted = {config.WC_CAT_PANEL, config.WC_CAT_HARDWARE}
     if roots:
         # Union of the selected assemblies. Each selected occurrence contributes its
         # own subtree once, so selecting two placements of the same cabinet counts
         # its panels twice (correct).
-        instances = []
+        found = []
         for comp in roots:
-            instances += panels.collect_panel_instances(design, root=comp, root_name=comp.name)
+            found += panels.collect_instances(design, root=comp, categories=wanted,
+                                              root_name=comp.name)
+    elif _dialog_found is not None:
+        found = list(_dialog_found)
     else:
-        instances = panels.collect_panel_instances(design)
+        found = panels.collect_instances(design, categories=wanted)
+    instances = [it for it in found if it['category'] == config.WC_CAT_PANEL]
+    hw_instances = [it for it in found if it['category'] == config.WC_CAT_HARDWARE]
     if not instances:
         ui.messageBox('No panels found.\n\nClassify panels with Set Type, or build '
                       'them with Carcass Maker / Shelf Creator, then try again.')
@@ -249,13 +264,6 @@ def command_execute(args: adsk.core.CommandEventArgs):
 
     # Purchased items (hardware) for the same scope — listed on the report so the
     # shop has the full order alongside the cut sheets.
-    if roots:
-        hw_instances = []
-        for comp in roots:
-            hw_instances += panels.collect_instances(
-                design, root=comp, categories={config.WC_CAT_HARDWARE}, root_name=comp.name)
-    else:
-        hw_instances = panels.collect_instances(design, categories={config.WC_CAT_HARDWARE})
     hw_instances = hw_instances * qty
     hardware_rows = _hardware_rows(hw_instances)
 
@@ -585,6 +593,7 @@ def _build_html(sections, instances, title, materials, hardware_rows=None):
 
 def command_destroy(args: adsk.core.CommandEventArgs):
     futil.log(f'{CMD_NAME} Command Destroy Event')
-    global local_handlers, _pickers
+    global local_handlers, _pickers, _dialog_found
     local_handlers = []
     _pickers = []
+    _dialog_found = None

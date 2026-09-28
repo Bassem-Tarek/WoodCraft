@@ -88,6 +88,7 @@ _pickers = []
 # reading them there can hand back a count with no entities behind it — which
 # would silently export nothing. `inputChanged` fires while they are still live.
 _scope_components = []
+_dialog_instances = None     # whole-design panels read when the dialog opened
 
 
 def start():
@@ -208,12 +209,14 @@ def _build_pickers(inputs, design):
     """A sheet-picker per matched material that stocks more than one sheet, plus a
     plain-text summary of what will and won't export. Mirrors Cut List so the two
     commands agree about which sheet a material nests on."""
-    global _pickers
+    global _pickers, _dialog_instances
     _pickers = []
 
     materials = sheets_store.load()['materials']
-    groups = panels.group_by_material_thickness(
-        panels.collect_panel_instances(design)) if design else []
+    # Kept for the export: the model can't change while this dialog is open, so
+    # a whole-design export reuses this walk instead of repeating it.
+    _dialog_instances = panels.collect_panel_instances(design) if design else []
+    groups = panels.group_by_material_thickness(_dialog_instances) if design else []
     for group in groups:
         group['mat'] = sheets_store.find_material(materials, group['material'],
                                                   group['thickness'])
@@ -404,6 +407,8 @@ def _collect(design, scope_input):
     if not _scope_components:
         _capture_scope(scope_input)
     if not _scope_components:
+        if _dialog_instances is not None:
+            return list(_dialog_instances)
         return panels.collect_panel_instances(design)
     instances = []
     for component in _scope_components:
@@ -608,7 +613,8 @@ def _summary(job, path, warnings):
 
 def command_destroy(args: adsk.core.CommandEventArgs):
     futil.log(f'{CMD_NAME} Command Destroy Event')
-    global local_handlers, _pickers, _scope_components
+    global local_handlers, _pickers, _scope_components, _dialog_instances
     local_handlers = []
     _pickers = []
     _scope_components = []
+    _dialog_instances = None

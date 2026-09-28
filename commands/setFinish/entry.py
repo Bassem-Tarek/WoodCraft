@@ -232,6 +232,33 @@ def _set_body_appearance(design, body, appearance) -> bool:
     return False
 
 
+def _same_asset(current, wanted) -> bool:
+    """Same material/appearance (by id, else by name)? False when either is None."""
+    if current is None or wanted is None:
+        return False
+    try:
+        if current.id and current.id == wanted.id:
+            return True
+    except Exception:
+        pass
+    try:
+        return current.name == wanted.name
+    except Exception:
+        return False
+
+
+def _has_own_appearance(body, appearance) -> bool:
+    """True when the body ALREADY carries `appearance` as its own override — the
+    write would change nothing. An appearance merely inherited from the material
+    doesn't count: the command's promise is an explicit override."""
+    try:
+        if body.appearanceSourceType != adsk.core.AppearanceSourceTypes.BodyAppearanceSource:
+            return False
+        return _same_asset(body.appearance, appearance)
+    except Exception:
+        return False
+
+
 def _inherits_appearance(body) -> bool:
     """True when the body is showing its MATERIAL's appearance rather than one of
     its own. Only these bodies would visibly change when the material changes; a
@@ -289,14 +316,22 @@ def _apply_finish(design, component, material, appearance) -> str:
     if material is not None:
         attempted = True
         wrote = False
+        # Writes that would change nothing are skipped: every material/appearance
+        # write is a document edit Fusion recomputes and records, so re-running Set
+        # Finish on a kitchen that is mostly right used to cost as much as the
+        # first run.
         try:
-            component.material = material
-            wrote = True
+            if _same_asset(component.material, material):
+                wrote = True
+            else:
+                component.material = material
+                wrote = True
         except Exception:
             pass
         for body in bodies:
             try:
-                body.material = material
+                if not _same_asset(body.material, material):
+                    body.material = material
                 wrote = True
             except Exception:
                 pass
@@ -307,7 +342,8 @@ def _apply_finish(design, component, material, appearance) -> str:
         attempted = True
         wrote = False
         for body in bodies:
-            if _set_body_appearance(design, body, appearance):
+            if _has_own_appearance(body, appearance) or \
+                    _set_body_appearance(design, body, appearance):
                 wrote = True
         failed = failed or not wrote
 

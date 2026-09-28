@@ -318,30 +318,43 @@ def _kw(name, words):
     return next((w for w in words if w in low), None)
 
 
-def _classify_leaf(occ, profile):
+_UNSET = object()
+
+
+def _classify_leaf(occ, profile, comp=_UNSET, role=_UNSET, category=_UNSET,
+                   name=None):
     """(role, source, reason) for one candidate part occurrence. Priority:
     persisted role attribute → wc_attrs category → name keywords (hardware
-    first, then front, door, carcass) → category panel fallback → skip."""
-    comp = _comp(occ)
-    role = wc_attrs.get_role(comp) if comp else None
+    first, then front, door, carcass) → category panel fallback → skip.
+
+    _collect passes what it has already read (component, role, category,
+    name) so the same attributes aren't fetched from Fusion twice per part."""
+    if comp is _UNSET:
+        comp = _comp(occ)
+    if role is _UNSET:
+        role = wc_attrs.get_role(comp) if comp else None
     if role:
         return role, 'attribute', f'role attribute: {role}'
-    if comp and wc_attrs.is_hardware(comp):
+    if category is _UNSET:
+        category = wc_attrs.get_category(comp) if comp else None
+    if category == config.WC_CAT_HARDWARE:
         return ROLE_SKIP, 'attribute', 'category: hardware'
     kws = profile['keywords']
-    w = _kw(occ.name, kws['hardware'])
+    if name is None:
+        name = occ.name
+    w = _kw(name, kws['hardware'])
     if w:
         return ROLE_SKIP, 'keyword', f"hardware keyword '{w}'"
-    w = _kw(occ.name, kws['front'])
+    w = _kw(name, kws['front'])
     if w:
         return ROLE_FRONT, 'keyword', f"front keyword '{w}'"
-    w = _kw(occ.name, kws['door'])
+    w = _kw(name, kws['door'])
     if w:
         return ROLE_DOOR, 'keyword', f"door keyword '{w}'"
-    w = _kw(occ.name, kws['carcass'])
+    w = _kw(name, kws['carcass'])
     if w:
         return ROLE_CARCASS, 'keyword', f"carcass keyword '{w}'"
-    if comp and wc_attrs.is_sheet_like(comp):
+    if comp and category in config.WC_SHEET_LIKE:
         return ROLE_CARCASS, 'attribute', 'category: panel'
     return ROLE_SKIP, 'unclassified', 'no attribute or keyword matched'
 
@@ -373,11 +386,14 @@ def _collect(occ, path, items, occs, profile, depth=0, display_name=None,
 
     comp = _comp(occ)
     role = wc_attrs.get_role(comp) if comp else None
+    category = _UNSET
+    occ_name = occ.name
     if role is None:
-        if comp and wc_attrs.is_hardware(comp):
+        category = wc_attrs.get_category(comp) if comp else None
+        if category == config.WC_CAT_HARDWARE:
             _add(ROLE_SKIP, 'attribute', 'category: hardware')
             return
-        hw = _kw(occ.name, profile['keywords']['hardware'])
+        hw = _kw(occ_name, profile['keywords']['hardware'])
         if hw:
             _add(ROLE_SKIP, 'keyword', f"hardware keyword '{hw}'")
             return
@@ -396,7 +412,8 @@ def _collect(occ, path, items, occs, profile, depth=0, display_name=None,
                 _collect(ch, p, items, occs, profile, depth + 1, child_name,
                          wrappers)
             return
-    role, source, reason = _classify_leaf(occ, profile)
+    role, source, reason = _classify_leaf(occ, profile, comp, role, category,
+                                          occ_name)
     _add(role, source, reason)
 
 

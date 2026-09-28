@@ -42,6 +42,7 @@ copied appearance names are UPPERCASE and the Crème one is mojibaked upstream):
 import json
 import os
 
+from . import file_cache
 from . import sheets_store  # reuse the same per-platform WoodCraft data folder
 
 
@@ -182,7 +183,12 @@ def normalize_profile(data):
 # ---------------------------------------------------------------------------
 def load():
     """The profile from disk, normalized. Missing/corrupt → defaults. Never
-    raises, never writes (first Save creates the file)."""
+    raises, never writes (first Save creates the file). Cached until the
+    file changes (see file_cache)."""
+    return file_cache.cached(profile_path(), _load_from_disk)
+
+
+def _load_from_disk():
     try:
         with open(profile_path(), "r", encoding="utf-8") as f:
             return normalize_profile(json.load(f))
@@ -196,6 +202,7 @@ def save(profile):
     os.makedirs(sheets_store.library_dir(), exist_ok=True)
     with open(profile_path(), "w", encoding="utf-8") as f:
         json.dump(cleaned, f, indent=2)
+    file_cache.forget(profile_path())
     return cleaned
 
 

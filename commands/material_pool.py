@@ -113,9 +113,47 @@ def available(kind, libraries=None):
     First occurrence wins, so library order decides who owns a shared name — the
     Favorites library legitimately holds two different appearances both called
     '0101 PE - FRONT WHITE', and a name-keyed list can only mean one of them.
-    Sorted by name so a 324-entry library is navigable in a dropdown."""
+    Sorted by name so a 324-entry library is navigable in a dropdown.
+
+    Cached: a full library scan reads every entry's name through the API (the
+    appearance libraries hold thousands), and Set Finish asks for four lists
+    when its dialog opens and again on OK. The cache key is each searched
+    library's name and entry count, so importing, removing or editing a library
+    is picked up on the next call."""
+    selected = _selected_libraries(libraries)
+    key = [kind]
+    for library in selected:
+        collection = _collection(library, kind)
+        try:
+            key.append((library.name, collection.count if collection else 0))
+        except Exception:
+            key.append(('?', 0))
+    key = tuple(key)
+    hit = _available_cache.get(key)
+    if hit is not None and all(_alive(obj) for _n, _l, obj in hit[:1]):
+        return list(hit)
+    found = _scan(selected, kind)
+    _available_cache[key] = found
+    return list(found)
+
+
+_available_cache = {}
+
+
+def _alive(obj):
+    try:
+        return obj.isValid if hasattr(obj, 'isValid') else True
+    except Exception:
+        return False
+
+
+def clear_cache():
+    _available_cache.clear()
+
+
+def _scan(selected, kind):
     found, seen = [], set()
-    for library in _selected_libraries(libraries):
+    for library in selected:
         collection = _collection(library, kind)
         if not collection:
             continue

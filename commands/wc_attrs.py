@@ -41,9 +41,18 @@ from .. import config
 # ---------------------------------------------------------------------------
 def set_value(component, name, value) -> bool:
     """Add or replace a WoodCraft attribute on `component`. Returns False if it
-    couldn't be written (e.g. a referenced/read-only component)."""
+    couldn't be written (e.g. a referenced/read-only component).
+
+    An attribute already holding `value` is left alone: a write is a document
+    edit (dirty flag, undo record), a read is not, so re-stamping a whole
+    kitchen with what it already says costs next to nothing."""
+    text = '' if value is None else str(value)
     try:
-        component.attributes.add(config.WC_GROUP, name, '' if value is None else str(value))
+        attributes = component.attributes
+        existing = attributes.itemByName(config.WC_GROUP, name)
+        if existing is not None and existing.value == text:
+            return True
+        attributes.add(config.WC_GROUP, name, text)
         return True
     except Exception:
         return False

@@ -43,7 +43,7 @@ from .settings import entry as settings
 from .createKitchenTemplate import entry as createKitchenTemplate  # Kitchen tab
 from .newKitchen import entry as newKitchen        # Kitchen tab
 from .finishKitchen import entry as finishKitchen  # Kitchen tab
-from .renameConfigs import entry as renameConfigs  # DEV panel
+from .foldersSelection import entry as foldersSelection  # both tabs
 from .inspectPanels import entry as inspectPanels  # DEV — remove later
 
 # Fusion automatically calls start() and stop() on each of these.
@@ -75,7 +75,9 @@ commands = [
     createKitchenTemplate,
     newKitchen,
     finishKitchen,
-    renameConfigs,  # DEV panel
+    # Folders Selection sits in both tabs (Output panel + Kitchen Project panel),
+    # so it starts after the Kitchen tab exists and lands at the end of it.
+    foldersSelection,
     inspectPanels,  # DEV — remove later
 ]
 

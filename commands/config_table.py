@@ -207,8 +207,9 @@ def top_table(design):
 def theme_columns(table):
     """{title: column} for the theme columns, in table order."""
     out = {}
-    for i in range(table.columns.count):
-        column = table.columns.item(i)
+    cols = table.columns
+    for i in range(cols.count):
+        column = cols.item(i)
         if 'ThemeColumn' in column.objectType:
             out[column.title] = column
     return out
@@ -216,8 +217,9 @@ def theme_columns(table):
 
 def property_columns(table):
     out = {}
-    for i in range(table.columns.count):
-        column = table.columns.item(i)
+    cols = table.columns
+    for i in range(cols.count):
+        column = cols.item(i)
         if 'PropertyColumn' in column.objectType:
             out[column.title] = column
     return out
@@ -225,27 +227,49 @@ def property_columns(table):
 
 def theme_values(column):
     """The value names a theme column can take, in table order."""
-    referenced = column.referencedTable
-    return [referenced.rows.item(i).name for i in range(referenced.rows.count)]
+    return [row.name for row in rows_of(column.referencedTable)]
 
 
 def combination_of(columns, row):
     """{theme title: value name} for one row; '' where a cell cannot be read."""
     out = {}
+    try:
+        row_id = row.id           # one API call, not one per column
+    except Exception:
+        return {title: '' for title in columns}
     for title, column in columns.items():
         try:
-            referenced = column.getCellByRowId(row.id).referencedTableRow
+            referenced = column.getCellByRowId(row_id).referencedTableRow
             out[title] = referenced.name if referenced else ''
         except Exception:
             out[title] = ''
     return out
 
 
+def rows_of(table):
+    """Every row of a table as a plain list — read once, so loops don't pay an
+    API round-trip for .count and .item(i) on every pass."""
+    rows = table.rows
+    return [rows.item(i) for i in range(rows.count)]
+
+
+def value_rows(column):
+    """{value name: referenced row} for a theme column — the lookup create()
+    needs for every cell, built once per column instead of walking the theme
+    table again for each new row."""
+    out = {}
+    for row in rows_of(column.referencedTable):
+        out.setdefault(row.name, row)
+    return out
+
+
 def row_by_name(table, name):
     """itemByName is unreliable on these tables; walk them instead."""
-    for i in range(table.rows.count):
-        if table.rows.item(i).name == name:
-            return table.rows.item(i)
+    rows = table.rows
+    for i in range(rows.count):
+        row = rows.item(i)
+        if row.name == name:
+            return row
     return None
 
 
@@ -328,7 +352,8 @@ def plan(design, document_name, rename=True, dedupe=True):
         vary = tuple(t for t in columns if not is_excluded(t))
     if not vary:
         return Plan('Nothing to vary — every theme in this table is excluded.')
-    if table.rows.count == 0:
+    all_rows = rows_of(table)
+    if not all_rows:
         return Plan('This table has no rows to copy from.')
 
     result = Plan()
@@ -337,20 +362,19 @@ def plan(design, document_name, rename=True, dedupe=True):
     combinations = [dict(zip(vary, values))
                     for values in itertools.product(*result.axes)]
     result.total = len(combinations)
-    result.base = table.rows.item(0)
+    result.base = all_rows[0]
     result.prefix = PREFIX if PREFIX is not None else document_name
 
     inherited = combination_of(columns, result.base)
     result.untouched = {t: v for t, v in inherited.items() if t not in vary}
 
-    result.rows = table.rows.count
+    result.rows = len(all_rows)
     active_id = _active_row_id(table)
 
     # Group the rows already in the table by the combination they carry.
     taken = set()
     groups = {}              # combination key -> [(index, row)]
-    for i in range(table.rows.count):
-        row = table.rows.item(i)
+    for i, row in enumerate(all_rows):
         whole = combination_of(columns, row)
         # A cell that would not read leaves the row alone rather than naming or
         # deleting it from a hole: '' is not a value, it is a failure to find one.
@@ -397,7 +421,8 @@ def plan(design, document_name, rename=True, dedupe=True):
             taken.add(row.name)
             continue
         if rename:
-            result.to_rename.append({'index': i, 'old': row.name, 'new': scheme})
+            result.to_rename.append({'index': i, 'id': row.id,
+                                     'old': row.name, 'new': scheme})
             taken.add(scheme)
         else:
             taken.add(row.name)
@@ -443,51 +468,93 @@ def delete_duplicates(design, result):
 def rename(design, result):
     """Rename every row the plan calls for. Returns (renamed, problems).
 
-    Run before create(), so the names the new rows want are free by the time
-    they are asked for.
+    Rows are found by id, so this is safe to run straight after
+    delete_duplicates() without planning again.
 
-    Where a name is passing from one row to another, the row that currently
-    holds it is parked on a temporary name first. Fusion does not swap names for
-    you: ask for one that is taken and it appends "(1)", leaving two rows that
-    read almost alike."""
+    Fusion does not swap names for you: ask for one that is taken and it appends
+    "(1)". So renames run in dependency order — a row whose new name is still
+    held by another moving row waits until that row has moved on. Every row
+    goes straight to its scheme name; only a true cycle (A wants B's name and B
+    wants A's) needs one row parked for a moment, and it is renamed to its
+    final name in the same pass."""
     table = top_table(design)
     if table is None or not result.to_rename:
         return 0, []
+    rows = table.rows
 
-    moving = {item['index']: item['new'] for item in result.to_rename}
-    held = {}
-    for i in range(table.rows.count):
-        held[table.rows.item(i).name] = i
+    held = {}                     # name -> row id, live
+    for row in rows_of(table):
+        held[row.name] = row.id
 
+    pending = {}
     problems = []
-    blocked = set()
     for item in result.to_rename:
+        row_id = item.get('id')
+        if row_id is None:
+            try:
+                row_id = rows.item(item['index']).id
+            except Exception as exc:
+                problems.append(f"{item['old']}: {exc}")
+                continue
         owner = held.get(item['new'])
-        if owner is None or owner == item['index']:
-            continue
-        if owner not in moving:
-            # Someone who is staying put has the name — the plan should not have
-            # produced this, so say so rather than letting Fusion invent a "(1)".
+        if owner is not None and owner != row_id and owner not in \
+                {i.get('id') for i in result.to_rename}:
             problems.append(f"{item['old']}: \"{item['new']}\" is already taken "
                             f"by a row that is staying as it is — left alone")
-            blocked.add(item['index'])
             continue
-        try:
-            table.rows.item(owner).name = '_wc_rename_%d' % owner
-        except Exception as exc:
-            problems.append(f'{table.rows.item(owner).name}: {exc}')
+        pending[row_id] = item
+
+    def _set_name(row_id, name):
+        row = rows.itemById(row_id)
+        if row is None:
+            raise RuntimeError('row no longer exists')
+        old = row.name
+        row.name = name
+        if held.get(old) == row_id:
+            del held[old]
+        held[name] = row_id
 
     renamed = 0
-    for item in result.to_rename:
-        if item['index'] in blocked:
+    while pending:
+        progress = False
+        for row_id, item in list(pending.items()):
+            owner = held.get(item['new'])
+            if owner is not None and owner != row_id:
+                continue            # wait for the holder to move first
+            try:
+                _set_name(row_id, item['new'])
+                renamed += 1
+            except Exception as exc:
+                # e.g. "Rename is unavailable because the Configured Design is
+                # still being saved" while a cloud save is in flight.
+                problems.append(f"{item['old']}: {exc}")
+            del pending[row_id]
+            progress = True
+        if progress or not pending:
             continue
+        # Blocked by a row that is NOT moving (its own rename failed): report
+        # rather than let Fusion invent a "(1)".
+        stuck = [rid for rid, it in pending.items()
+                 if held.get(it['new']) not in pending]
+        for rid in stuck:
+            it = pending.pop(rid)
+            problems.append(f"{it['old']}: \"{it['new']}\" is still taken — "
+                            f"left alone")
+        if stuck:
+            continue
+        # A cycle: every remaining row wants a name another remaining row holds.
+        # Park one just long enough to break it.
+        row_id, item = next(iter(pending.items()))
+        parked = f"{item['new']} ~"
+        n = 1
+        while parked in held:
+            n += 1
+            parked = f"{item['new']} ~{n}"
         try:
-            table.rows.item(item['index']).name = item['new']
-            renamed += 1
+            _set_name(row_id, parked)
         except Exception as exc:
-            # e.g. "Rename is unavailable because the Configured Design is still
-            # being saved" while a cloud save is in flight.
             problems.append(f"{item['old']}: {exc}")
+            del pending[row_id]
     return renamed, problems
 
 
@@ -497,8 +564,12 @@ def create(design, result):
     Nothing is built here and nothing is saved — creating a row is instant, and
     Fusion builds a configuration when it is activated."""
     table = top_table(design)
+    if table is None or not result.to_create:
+        return 0, []
     columns = theme_columns(table)
-    parts = property_columns(table)
+    parts = property_columns(table) if PART_NUMBER_FROM_NAME else {}
+    # Theme value rows looked up once per column, not once per cell.
+    lookups = {title: value_rows(columns[title]) for title in result.vary}
     made, problems = 0, []
 
     for name, combination in result.to_create:
@@ -507,13 +578,14 @@ def create(design, result):
             if row is None:
                 problems.append(f'{name}: copy failed')
                 continue
+            row_id = row.id
             for title in result.vary:
                 column = columns[title]
-                target = row_by_name(column.referencedTable, combination[title])
-                column.getCellByRowId(row.id).referencedTableRow = target
+                target = lookups[title].get(combination[title])
+                column.getCellByRowId(row_id).referencedTableRow = target
             if PART_NUMBER_FROM_NAME and 'Part Number' in parts:
                 try:
-                    parts['Part Number'].getCellByRowId(row.id).value = row.name
+                    parts['Part Number'].getCellByRowId(row_id).value = row.name
                 except Exception:
                     pass
             made += 1

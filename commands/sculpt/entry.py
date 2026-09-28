@@ -135,16 +135,28 @@ def command_execute(args: adsk.core.CommandEventArgs):
     combines = root.features.combineFeatures
     combine_count = 0
 
+    # Every tool's box is read ONCE (six API calls) rather than once per target
+    # panel; the prune below is then plain float comparisons.
+    tools = []
+    for tool_body in accessory_tool_bodies:
+        try:
+            tools.append((tool_body, _box(tool_body.boundingBox)))
+        except Exception:
+            continue
+
     for target_body in target_bodies:
-        target_bbox = target_body.boundingBox
+        try:
+            target_bbox = _box(target_body.boundingBox)
+        except Exception:
+            continue
         matching_tools = adsk.core.ObjectCollection.create()
 
-        for tool_body in accessory_tool_bodies:
-            if tool_body == target_body:
+        for tool_body, tool_box in tools:
+            # Cheap bounding-box prune first, then a precise interference test.
+            if not _boxes_overlap(target_bbox, tool_box):
                 continue
             try:
-                # Cheap bounding-box prune first, then a precise interference test.
-                if not bbox_overlaps(target_bbox, tool_body.boundingBox):
+                if tool_body == target_body:
                     continue
             except Exception:
                 continue
@@ -196,8 +208,9 @@ def _collect_tool_bodies(root: adsk.fusion.Component, search_terms, scan_hidden:
         is_hardware = any(hint in comp_name or hint in occ_name for hint in HARDWARE_NAME_HINTS)
 
         bodies_in_occ = []
-        for i in range(comp.bRepBodies.count):
-            body = comp.bRepBodies.item(i)
+        comp_bodies = comp.bRepBodies
+        for i in range(comp_bodies.count):
+            body = comp_bodies.item(i)
             name = body.name.lower()
             is_named_tool = any(term in name for term in search_terms)
             is_hidden = not body.isLightBulbOn
@@ -207,7 +220,7 @@ def _collect_tool_bodies(root: adsk.fusion.Component, search_terms, scan_hidden:
         # Fallback: a recognised hardware component with no flagged tool body —
         # use all of its bodies.
         if not bodies_in_occ and is_hardware:
-            bodies_in_occ = [comp.bRepBodies.item(i) for i in range(comp.bRepBodies.count)]
+            bodies_in_occ = [comp_bodies.item(i) for i in range(comp_bodies.count)]
 
         for body in bodies_in_occ:
             try:
@@ -231,6 +244,19 @@ def _bodies_intersect(body_a: adsk.fusion.BRepBody, body_b: adsk.fusion.BRepBody
         return result.value < INTERSECT_TOL_CM
     except Exception:
         return True
+
+
+def _box(bb):
+    """BoundingBox3D → plain (x0, y0, z0, x1, y1, z1) floats."""
+    lo, hi = bb.minPoint, bb.maxPoint
+    return (lo.x, lo.y, lo.z, hi.x, hi.y, hi.z)
+
+
+def _boxes_overlap(a, b, eps=0.01):
+    """bbox_overlaps on plain tuples (same 0.01 cm tolerance)."""
+    return not (a[3] + eps < b[0] or a[0] - eps > b[3] or
+                a[4] + eps < b[1] or a[1] - eps > b[4] or
+                a[5] + eps < b[2] or a[2] - eps > b[5])
 
 
 def bbox_overlaps(box1: adsk.core.BoundingBox3D, box2: adsk.core.BoundingBox3D) -> bool:

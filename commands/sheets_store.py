@@ -48,6 +48,8 @@ guillotine packer rotate a part 90°; '180' doesn't change a rectangle's footpri
 import json
 import os
 
+from . import file_cache
+
 ROTATIONS = ('all', 'none', '90_270', '180')
 DEFAULT_COLOR = '#C9A86A'
 
@@ -258,7 +260,12 @@ def _edgebands_from_data(data):
 def load():
     """Return {'materials': [...], 'edgebands': [...]} from the global library,
     migrating the old flat format if needed. Missing/corrupt/empty → defaults
-    (DEFAULT_LIBRARY materials + DEFAULT_EDGEBANDS). Never raises, never writes."""
+    (DEFAULT_LIBRARY materials + DEFAULT_EDGEBANDS). Never raises, never writes.
+    Cached until the file changes (see file_cache) — reports call this often."""
+    return file_cache.cached(library_path(), _load_from_disk)
+
+
+def _load_from_disk():
     try:
         with open(library_path(), "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -286,6 +293,7 @@ def save(materials, edgebands=None):
     os.makedirs(library_dir(), exist_ok=True)
     with open(library_path(), "w", encoding="utf-8") as f:
         json.dump(cleaned, f, indent=2)
+    file_cache.forget(library_path())
     return cleaned
 
 

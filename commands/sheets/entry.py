@@ -156,10 +156,15 @@ def _active_design():
 
 def _payload():
     design = _active_design()
+    # Walk the design ONCE for both lists (it used to be walked twice).
+    try:
+        found = panels.collect_panel_instances(design) if design else []
+    except Exception:
+        found = []
     return {
         'library': sheets_store.load(),
-        'designMaterials': panels.design_panel_materials(design),
-        'designGroups': panels.design_panel_groups(design),
+        'designMaterials': panels.design_panel_materials(design, found),
+        'designGroups': panels.design_panel_groups(design, found),
         'path': sheets_store.library_path(),
         'rotations': list(sheets_store.ROTATIONS),
     }

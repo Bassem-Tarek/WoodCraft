@@ -41,6 +41,7 @@ import time
 import adsk.core
 import adsk.fusion
 
+from .. import folder_store
 from .. import ui_helpers
 from ...lib import fusionAddInUtils as futil
 from ... import config
@@ -81,7 +82,9 @@ _fetching = False        # guard against re-entrant thumbnail fetches
 local_handlers = []
 
 # Module-level cache (persists across dialog opens for speed; cleared by Refresh).
-_project = None          # cached DataProject (None until found)
+_project = None          # cached library ROOT DataFolder (None until found)
+_source_sel = None       # the Folders Selection choice the cache was built from
+_error = ''              # why the library couldn't be found (shown in the dialog)
 _categories = None       # dict: category name -> DataFolder (None until loaded)
 _items_cache = {}        # category name -> dict(part name -> DataFile)
 
@@ -156,27 +159,36 @@ def _find_hardware_project():
     return None
 
 
-def _all_project_names():
-    names = []
+def _library_root():
+    """(DataFolder, error) for the hardware library: the folder picked in Folders
+    Selection when there is one (any hub, found straight by id), else the root
+    of config.HARDWARE_PROJECT_NAME found by name."""
+    configured, folder = folder_store.resolve('hardware')
+    if configured:
+        if folder is None:
+            return None, folder_store.missing_message('hardware')
+        return folder, ''
+    project = _find_hardware_project()
+    if project is None:
+        return None, ''
     try:
-        hubs = app.data.dataHubs
-        for h in range(hubs.count):
-            projects = hubs.item(h).dataProjects
-            for i in range(projects.count):
-                names.append(projects.item(i).name)
+        return project.rootFolder, ''
     except Exception:
-        pass
-    return names
+        return None, ''
 
 
 def _ensure_loaded():
-    """Populate the project + category cache if it isn't already (slow once)."""
-    global _project, _categories
+    """Populate the library + category cache if it isn't already (slow once)."""
+    global _project, _categories, _error, _items_cache, _source_sel
+    # A new choice in Folders Selection invalidates what was cached for the old one.
+    sel = folder_store.get('hardware')
+    if sel != _source_sel:
+        _project, _categories, _items_cache, _source_sel = None, None, {}, sel
     if _project is None:
-        _project = _find_hardware_project()
+        _project, _error = _library_root()
     if _project is not None and _categories is None:
         _categories = {}
-        folders = _project.rootFolder.dataFolders
+        folders = _project.dataFolders
         for i in range(folders.count):
             folder = folders.item(i)
             _categories[folder.name] = folder
@@ -241,14 +253,16 @@ def command_created(args: adsk.core.CommandCreatedEventArgs):
     _ensure_loaded()
 
     if _project is None:
-        type_dd.listItems.add(f"Project '{config.HARDWARE_PROJECT_NAME}' not found", True)
+        type_dd.listItems.add('Hardware library not found', True)
         type_dd.isEnabled = False
         item_dd.isEnabled = False
-        available = _all_project_names()
-        hint = ', '.join(available) if available else '(none visible)'
-        info.formattedText = (
-            f"Set <b>HARDWARE_PROJECT_NAME</b> in config.py to your hardware "
-            f"project, then click Refresh. Projects I can see: {hint}")
+        if _error:
+            info.formattedText = _error
+        else:
+            info.formattedText = (
+                f"Project '{config.HARDWARE_PROJECT_NAME}' was not found. Pick the "
+                f"hardware library with <b>Folders Selection</b> (any hub or "
+                f"project), then click Refresh.")
         _add_handlers(args)
         return
 
@@ -257,8 +271,9 @@ def command_created(args: adsk.core.CommandCreatedEventArgs):
         type_dd.isEnabled = False
         item_dd.isEnabled = False
         info.formattedText = (
-            f"Project '{config.HARDWARE_PROJECT_NAME}' has no sub-folders. Add a "
-            f"folder per hardware category, then click Refresh.")
+            f"'{_project.name}' has no sub-folders. Add a folder per hardware "
+            f"category (or pick another folder with Folders Selection), then "
+            f"click Refresh.")
         _add_handlers(args)
         return
 
@@ -316,6 +331,7 @@ def _refresh(inputs):
     _project = None
     _categories = None
     _items_cache = {}
+    folder_store.invalidate('hardware')
     _ensure_loaded()
 
     type_dd = inputs.itemById(TYPE_DD_ID)

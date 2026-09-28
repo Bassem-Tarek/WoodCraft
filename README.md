@@ -128,6 +128,7 @@ touched.
 | **Cut List & Nest** | Collects all panels, groups them by **(material, thickness)**, matches each group to the Sheets library, and opens a **colour‑coded HTML report**: cut‑list table, per‑sheet **guillotine nesting** diagrams, sheet count, yield, optional cost, a **purchased‑items** list (your hardware + costs), and a printable label sheet. Pick one or more assemblies (or the whole design), and choose which stock sheet to nest on when a material has several. |
 | **FCC Export** | Nests the design's panels exactly as Cut List does, then writes the **FCC nesting XML** a **Nanxing** production line imports — one job packet carrying the cutting layout, the **drilling and grooving** read straight off the B‑Rep, the **edgebanding** spec and the order data the labels print. Reads holes and grooves geometrically rather than from how they were modelled, so hand‑modelled joinery exports as readily as Line Boring's. Writes the machine's *pre‑nest* form: the line's own software still assigns the tool, generates the NC program and places the labels. See `docs/FCC_EXPORT.md`. |
 | **BOM** | A **docked palette** showing the **assembly hierarchy** — root → components → sub‑components — one row per component with its **type, dimensions, material, quantity and part number** (the native Fusion `Component.partNumber`). Expand/collapse the tree and **Export to Excel** (a native `.xlsx`, written with the stdlib — no add‑on dependency, with **live formulas** so costs recalc when you tweak quantities). Shows the active **configuration** name. This is the structural bill; the cutting/nesting view lives in Cut List & Nest. |
+| **Folders Selection** | Chooses the **cloud folders** the tools read from — the hardware library (Insert Hardware), the handles (Fit Handles), the master cabinet library and each project type's kitchens folder (Kitchen tab) — in **any hub (team / tenant)** and any project. Pick a Reference, then a Hub and Project, browse into the folder and press **Use this folder**; **Use default** goes back to the names in `config.py`. Choices are stored by ID in `%APPDATA%/WoodCraft/folders.json` and win over `config.py`; resolving by ID is also faster than the old name search. Also on the Kitchen tab. |
 | **Settings** | Add‑on‑wide options shared by every design (stored next to the Sheets library). Today that's the panel‑cost **waste factor** — the percentage added on top of a panel's raw area when the BOM estimates its cost from sheet prices, since nesting never uses 100 % of a sheet. Not promoted to the toolbar; find it in the Output panel's overflow. |
 
 ### Dev
@@ -194,11 +195,11 @@ time you open **Sheets** or run **Cut List**, so there's nothing else to configu
 - **macOS:** the manifest declares `"supportedOS": "windows"`, so Fusion on a Mac
   won't list the add-in until you change that line in `WoodCraft.manifest` to
   `"mac"` (or remove the key). The code itself is cross‑platform.
-- **Insert Hardware** is the only feature needing external setup: it reads a Fusion
-  cloud project named **`WoodCraft Hardware`** (set in `config.py` →
-  `HARDWARE_PROJECT_NAME`). Without it, that one command just shows an empty
-  catalogue and lists the projects it *can* see; **everything else works with zero
-  config.**
+- **Insert Hardware** is the only feature needing external setup: by default it
+  reads a Fusion cloud project named **`WoodCraft Hardware`** (set in `config.py` →
+  `HARDWARE_PROJECT_NAME`), or any folder in any hub you pick with **Folders
+  Selection**. Without it, that one command just shows an empty catalogue; **everything
+  else works with zero config.**
 - **For a "release" build:** set `DEBUG = False` in `config.py` (quiets the Text
   Commands log) and optionally delete `commands/inspectPanels/` (the Dev tool).
 
@@ -272,6 +273,9 @@ WoodCraft/
 │   ├── fcc_features.py         # B-Rep -> flat-panel frame, holes, grooves, banded edges
 │   ├── sheets_store.py         # global stock-sheet + edgeband library (load/save/match; pure)
 │   ├── settings_store.py       # global add-on settings JSON (waste factor)
+│   ├── folder_store.py         # cloud folders chosen in Folders Selection (by id; folders.json)
+│   ├── file_cache.py           # memoised JSON-store loads (re-read only when the file changes)
+│   ├── entity_memo.py          # per-dialog memo of measured selections + batched preview lines
 │   ├── finish_store.py         # per-dropdown material/appearance name lists (pure)
 │   ├── material_pool.py        # resolves those names against the loaded material libraries
 │   ├── report_utils.py         # shared HTML report shell, CSS, escaping, open-in-browser
@@ -287,6 +291,7 @@ WoodCraft/
 │   ├── fccExport/              # FCC Export: nesting XML for a Nanxing line
 │   ├── bom/                    # BOM palette: entry.py + resources/html/{index,style,main}
 │   ├── settings/               # Add-on settings dialog
+│   ├── foldersSelection/       # Folders Selection: pick the cloud folders the tools read
 │   ├── createKitchenTemplate/  # Kitchen TAB: stock a spare kitchen + library copy
 │   ├── newKitchen/             # Kitchen TAB: rename a template into a customer job
 │   ├── finishKitchen/          # Kitchen TAB: clear the unused library copy

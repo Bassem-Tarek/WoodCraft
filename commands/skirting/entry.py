@@ -66,6 +66,7 @@ import os
 import adsk.core
 import adsk.fusion
 
+from .. import entity_memo
 from .. import ui_helpers
 from .. import wc_attrs
 from .. import part_names
@@ -185,7 +186,18 @@ def _occurrence_boxes(occurrence, depth=0):
     return boxes
 
 
+# Measured boxes per selected entity, kept for the life of the dialog so a
+# preview redraw (every input change) doesn't re-walk the same cabinets.
+_box_memo = entity_memo.EntityMemo()
+_class_memo = entity_memo.EntityMemo()
+
+
 def _world_boxes(entity):
+    """World-space bounding boxes for one selection (memoised for the dialog)."""
+    return _box_memo.get(entity, _measure_world_boxes)
+
+
+def _measure_world_boxes(entity):
     """World-space bounding boxes for one selected side panel."""
     try:
         if entity.objectType == adsk.fusion.Occurrence.classType():
@@ -367,6 +379,13 @@ def _island_footprint(boxes, frames):
 # Working out which way a cabinet faces, without being told
 # ---------------------------------------------------------------------------
 def _classified_boxes(occurrence, depth=0):
+    """Memoised for the dialog at the top level (see _measure_classified)."""
+    if depth == 0:
+        return _class_memo.get(occurrence, _measure_classified)
+    return _measure_classified(occurrence, depth)
+
+
+def _measure_classified(occurrence, depth=0):
     """[(group, box)] for every solid inside a cabinet, group from part_names.
 
     'group' is 'carcass', 'door' or None — the same classification Set Finish uses,
@@ -376,9 +395,11 @@ def _classified_boxes(occurrence, depth=0):
     try:
         component = occurrence.component
         group = part_names.group_for(component)
-        for i in range(component.bRepBodies.count):
-            body = occurrence.bRepBodies.item(i) if i < occurrence.bRepBodies.count \
-                else component.bRepBodies.item(i)
+        comp_bodies = component.bRepBodies
+        occ_bodies = occurrence.bRepBodies
+        comp_count, occ_count = comp_bodies.count, occ_bodies.count
+        for i in range(comp_count):
+            body = occ_bodies.item(i) if i < occ_count else comp_bodies.item(i)
             if body.isSolid:
                 out.append((group, _as_box(body.boundingBox)))
     except Exception:
@@ -387,7 +408,7 @@ def _classified_boxes(occurrence, depth=0):
         try:
             children = occurrence.childOccurrences
             for i in range(children.count):
-                out.extend(_classified_boxes(children.item(i), depth + 1))
+                out.extend(_measure_classified(children.item(i), depth + 1))
         except Exception:
             pass
     return out
@@ -773,6 +794,8 @@ def _build_run(root, label, groups, segments, ground_z, bottom_z, thickness=0.0)
 # ---------------------------------------------------------------------------
 def command_created(args: adsk.core.CommandCreatedEventArgs):
     futil.log(f'{CMD_NAME} Command Created Event')
+    _box_memo.clear()
+    _class_memo.clear()
     inputs = args.command.commandInputs
 
     runs = inputs.addSelectionInput(
@@ -885,18 +908,20 @@ def command_preview(args: adsk.core.CommandEventArgs):
         wrap = adsk.fusion.CustomGraphicsSolidColorEffect.create(
             adsk.core.Color.create(*RETURN_COLOR))
 
+        lines = entity_memo.LineBatch()
         for plan in plans:
             low, high = plan['ground'], plan['bottom']
             for segment, pieces in zip(plan['chain'], plan['groups']):
                 colour = wrap if getattr(segment, 'label', '') == 'return' else board
                 for polygon in pieces:
                     for z in (low, high):
-                        _add_strip(group, colour,
-                                   [(x, y, z) for x, y in polygon]
-                                   + [(polygon[0][0], polygon[0][1], z)])
+                        lines.strip(colour,
+                                    [(x, y, z) for x, y in polygon]
+                                    + [(polygon[0][0], polygon[0][1], z)])
                     for x, y in polygon:
-                        _add_strip(group, colour, [(x, y, low), (x, y, high)])
+                        lines.strip(colour, [(x, y, low), (x, y, high)])
 
+        lines.draw(group)
         _graphics_group = group
         app.activeViewport.refresh()
     except Exception:
@@ -940,8 +965,26 @@ def command_execute(args: adsk.core.CommandEventArgs):
                            plans[0]['ground'] if plans else 0.0, notes))
 
 
+def _summary(total_runs, total_pieces, ground_z, notes):
+    """The message shown after a build. (Execute called this before it existed,
+    so every successful build ended in a NameError instead of a report.)"""
+    if total_runs:
+        lines = [f'Built {total_runs} skirting run(s) from {total_pieces} board(s), '
+                 f'standing on Z = {ground_z * 10.0:.0f} mm.']
+    else:
+        lines = ['No skirting was built.',
+                 'Select the cabinets (or an island), and check the thickness and '
+                 'setback.']
+    if notes:
+        lines.append('')
+        lines.extend(notes)
+    return '\n'.join(lines)
+
+
 def command_destroy(args: adsk.core.CommandEventArgs):
     futil.log(f'{CMD_NAME} Command Destroy Event')
     global local_handlers
     _clear_preview()
+    _box_memo.clear()
+    _class_memo.clear()
     local_handlers = []

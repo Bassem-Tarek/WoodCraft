@@ -88,6 +88,7 @@ import adsk.fusion
 
 from . import configs
 from .. import config_table
+from .. import folder_store
 from .. import ui_helpers
 from .. import wc_attrs
 from ...lib import fusionAddInUtils as futil
@@ -302,43 +303,101 @@ def box_span(box, direction):
 # ---------------------------------------------------------------------------
 # The handle library
 # ---------------------------------------------------------------------------
+_files_error = ''       # why no handles could be listed (shown in the dialog)
+
+
 def _hardware_project():
+    """The config.HARDWARE_PROJECT_NAME project — the active hub first (where it
+    almost always is), then the other hubs."""
     target = config.HARDWARE_PROJECT_NAME.strip().lower()
     try:
-        hubs = app.data.dataHubs
-        for h in range(hubs.count):
-            projects = hubs.item(h).dataProjects
-            for p in range(projects.count):
-                if projects.item(p).name.strip().lower() == target:
-                    return projects.item(p)
+        active = app.data.activeHub
     except Exception:
-        futil.handle_error('Fit Handles: reading the hardware project')
+        active = None
+    hubs = [active] if active else []
+    try:
+        all_hubs = app.data.dataHubs
+        for h in range(all_hubs.count):
+            hub = all_hubs.item(h)
+            if not active or hub.id != active.id:
+                hubs.append(hub)
+    except Exception:
+        pass
+    for hub in hubs:
+        try:
+            projects = hub.dataProjects
+            for p in range(projects.count):
+                project = projects.item(p)
+                if project.name.strip().lower() == target:
+                    return project
+        except Exception:
+            continue
     return None
 
 
-def _handle_files():
-    """[(label, DataFile)] from the project's Handles folder, sorted by name."""
+def _pick_handles_subfolder(parent):
+    """The child of `parent` that answers to one of HANDLE_FOLDER_NAMES."""
+    if parent is None:
+        return None
+    folders = parent.dataFolders
+    by_name = {}
+    for i in range(folders.count):
+        by_name.setdefault(folders.item(i).name, folders.item(i))
+    chosen = config_table.pick_name(list(by_name), HANDLE_FOLDER_NAMES)
+    return by_name.get(chosen) if chosen is not None else None
+
+
+def _handles_folder():
+    """(DataFolder, error). Folders Selection wins; then a Handles folder inside
+    the hardware library chosen there; then the config.py project by name."""
+    configured, folder = folder_store.resolve('handles')
+    if configured:
+        if folder is None:
+            return None, folder_store.missing_message('handles')
+        return folder, ''
+    hw_configured, hw_folder = folder_store.resolve('hardware')
+    if hw_configured and hw_folder is not None:
+        found = _pick_handles_subfolder(hw_folder)
+        if found is not None:
+            return found, ''
     project = _hardware_project()
     if project is None:
-        return []
+        return None, (f'The "{config.HARDWARE_PROJECT_NAME}" project was not found. '
+                      f'Pick the handles folder with Folders Selection.')
+    found = _pick_handles_subfolder(project.rootFolder)
+    if found is None:
+        return None, (f'"{config.HARDWARE_PROJECT_NAME}" has no "{HANDLE_FOLDER_NAME}" '
+                      f'folder. Pick the handles folder with Folders Selection.')
+    return found, ''
+
+
+def _list_files(folder):
+    files = folder.dataFiles
+    rows = []
+    for i in range(files.count):
+        data_file = files.item(i)
+        rows.append((data_file.name, data_file))
+    rows.sort(key=lambda row: row[0].lower())
+    return rows
+
+
+def _handle_files():
+    """[(label, DataFile)] from the handles folder, sorted by name.
+
+    The listing is cached for a few minutes (folder_store.cached_listing), so
+    opening Fit Handles again doesn't list the cloud folder again; a new choice
+    in Folders Selection clears it."""
+    global _files_error
+    _files_error = ''
     try:
-        folders = project.rootFolder.dataFolders
-        by_name = {}
-        for i in range(folders.count):
-            by_name.setdefault(folders.item(i).name, folders.item(i))
-        chosen = config_table.pick_name(list(by_name), HANDLE_FOLDER_NAMES)
-        if chosen is None:
+        folder, error = _handles_folder()
+        if folder is None:
+            _files_error = error
             return []
-        folder = by_name[chosen]
-        files = folder.dataFiles
-        rows = []
-        for i in range(files.count):
-            data_file = files.item(i)
-            rows.append((data_file.name, data_file))
-        rows.sort(key=lambda row: row[0].lower())
-        return rows
+        return folder_store.cached_listing('handles', folder, _list_files)
     except Exception:
         futil.handle_error('Fit Handles: listing the Handles folder')
+        _files_error = 'The handles folder could not be read. Check that you are signed in.'
         return []
 
 
@@ -1120,7 +1179,8 @@ def fit_handle(root, occurrence, profile, marker_point, axes, calibration,
     joint_origin, joint = build_joint(root, occurrence, profile, marker_point, axes,
                                       name, flipped=calibration.flip, angle=angle,
                                       displacement=displacement)
-    wait(20)
+    # No event pumping here: nothing is measured off this handle unless the
+    # caller checks it (first handle per cabinet), and the caller waits then.
 
     note = ''
     if not too_long and abs(desired - at_target) > 0.05:
@@ -1247,16 +1307,13 @@ def command_created(args: adsk.core.CommandCreatedEventArgs):
             dropdown.listItems.add(label, i == 0)
     else:
         dropdown.listItems.add('No handles found', True)
-    dropdown.tooltip = (f'From the "{HANDLE_FOLDER_NAME}" folder of the '
-                        f'"{config.HARDWARE_PROJECT_NAME}" project.')
+    dropdown.tooltip = 'From the handles folder (see Folders Selection).'
 
     message = (f'Fits the chosen handle to every locator point in every cabinet\'s '
                f'"{HANDLE_SKETCH_NAME}" sketch. Handles already fitted by this '
                f'command are removed first, so this swaps rather than stacks.')
     if not _files:
-        message = (f'No handles found. Check that the project '
-                   f'"{config.HARDWARE_PROJECT_NAME}" has a "{HANDLE_FOLDER_NAME}" '
-                   f'folder and that you are signed in.')
+        message = _files_error or 'No handles found in the handles folder.'
     info = inputs.addTextBoxCommandInput(INFO_ID, '', message, 3, True)
     info.isFullWidth = True
 
@@ -1403,7 +1460,11 @@ def _fit_handles(label, data_file):
             except Exception as exc:
                 problems.append(f'{where}: could not insert the handle ({exc})')
                 continue
-            wait(20)
+            if template is None:
+                # Only the first INSERT loads an external file and needs the event
+                # loop pumped before it can be measured; copies of an already
+                # loaded component are ready at once.
+                wait(20)
             wc_attrs.set_value(handle_occ, WC_HANDLE_TAG, label)
             if template is None:
                 template = handle_occ.component
@@ -1440,6 +1501,7 @@ def _fit_handles(label, data_file):
             # back to measuring and nudging, which is slow but always right.
             if first_on_cabinet:
                 first_on_cabinet = False
+                wait(20)           # let the new joint settle before measuring it
                 wrong = check_fit(handle_occ, profile, wanted, outward, desired)
                 if wrong:
                     refine(design, handle_occ, joint_origin, axes, wanted, desired)

@@ -43,7 +43,8 @@ Design workspace (FusionSolidEnvironment)
     │   ├── Sheets           (palette)     id = WoodCraft_sheets
     │   ├── Cut List & Nest  (button)      id = WoodCraft_cutList
     │   ├── BOM              (palette)     id = WoodCraft_bom
-    │   └── Settings         (button)      id = WoodCraft_settings   (not promoted)
+    │   ├── Settings         (button)      id = WoodCraft_settings   (not promoted)
+    │   └── Folders Selection (button)     id = WoodCraft_foldersSelection
     └── Panel: "Dev"                       id = WoodCraft_dev_panel
         └── Inspect Panels   (button)      id = WoodCraft_inspectPanels   (removable)
 
@@ -52,7 +53,8 @@ Design workspace (FusionSolidEnvironment)
     └── Panel: "Kitchen Project"           id = WoodCraft_kitchen_project_panel
         ├── Create Kitchen Template        id = WoodCraft_createKitchenTemplate
         ├── New Kitchen      (button)      id = WoodCraft_newKitchen
-        └── Finish Kitchen   (button)      id = WoodCraft_finishKitchen
+        ├── Finish Kitchen   (button)      id = WoodCraft_finishKitchen
+        └── Folders Selection (button)     id = WoodCraft_foldersSelection  (same command)
 ```
 
 > ⚠️ **"Kitchen" names two different things — don't merge them.**
@@ -126,6 +128,7 @@ take, point `ICON_FOLDER` at a path Fusion has never read (e.g. a
 | Cut List & Nest  | `cutList/`                         | `WoodCraft_cutList`    |
 | BOM              | `bom/`                             | `WoodCraft_bom`        |
 | Settings         | `settings/`                        | `WoodCraft_settings`   |
+| Folders Selection | `foldersSelection/`               | `WoodCraft_foldersSelection` |
 | Inspect Panels   | `inspectPanels/`                   | `WoodCraft_inspectPanels` |
 | Create Kitchen Template | `createKitchenTemplate/`    | `WoodCraft_createKitchenTemplate` |
 | New Kitchen      | `newKitchen/`                      | `WoodCraft_newKitchen` |

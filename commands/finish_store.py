@@ -44,6 +44,7 @@ than raising.
 import json
 import os
 
+from . import file_cache
 from . import sheets_store
 
 # Category keys. These are the JSON keys AND the identifiers passed around in code,
@@ -139,7 +140,11 @@ def normalize(data):
 
 def load():
     """Store dict from disk, defaults for anything missing or corrupt. Never raises
-    and never writes."""
+    and never writes. Cached until the file changes (see file_cache)."""
+    return file_cache.cached(lists_path(), _load_from_disk)
+
+
+def _load_from_disk():
     try:
         with open(lists_path(), 'r', encoding='utf-8') as f:
             return normalize(json.load(f))
@@ -155,6 +160,7 @@ def save(data):
     os.makedirs(sheets_store.library_dir(), exist_ok=True)
     with open(lists_path(), 'w', encoding='utf-8') as f:
         json.dump(cleaned, f, indent=2, ensure_ascii=False)
+    file_cache.forget(lists_path())
     return cleaned
 
 

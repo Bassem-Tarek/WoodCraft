@@ -240,8 +240,7 @@ def read_table(design):
     if title is None:
         return None, None, None
     rows = {}
-    for i in range(table.rows.count):
-        row = table.rows.item(i)
+    for row in config_table.rows_of(table):
         rows[row.name] = config_table.combination_of(columns, row)
     return rows, list(columns), title
 
@@ -375,6 +374,11 @@ def decide(library, want_gola, log, problems):
                                   else OTHER_VALUE):
         log(f'  {library.data_file.name}: "{title}" → "{target_value}"')
 
+    # Looked up once for the whole library rather than walking the table again
+    # for every cabinet that needs a new row.
+    by_name = None
+    target_row = None
+
     for ref in library.refs:
         current = library.rows.get(ref.row_name)
         if current is None:
@@ -390,11 +394,16 @@ def decide(library, want_gola, log, problems):
         if match is None:
             name = config_table.row_name(prefix, wanted, library.titles)
             try:
-                source = config_table.row_by_name(table, ref.row_name)
+                if by_name is None:
+                    by_name = {r.name: r for r in config_table.rows_of(table)}
+                    target_row = config_table.value_rows(column).get(target_value)
+                source = by_name.get(ref.row_name)
+                if source is None:
+                    source = config_table.row_by_name(table, ref.row_name)
                 new_row = source.copy(name)
+                by_name[new_row.name] = new_row
                 cell = column.getCellByRowId(new_row.id)
-                cell.referencedTableRow = config_table.row_by_name(
-                    column.referencedTable, target_value)
+                cell.referencedTableRow = target_row
             except Exception as exc:
                 problems.append(f'{library.data_file.name}: could not add '
                                 f'"{name}" ({exc})')
@@ -456,12 +465,14 @@ def apply_theme(app, root, want_gola, log):
     for ref in pending:
         try:
             key = ref.data_file.id
-            table = tables.get(key)
-            if table is None:
+            by_name = tables.get(key)
+            if by_name is None or ref.target not in by_name:
                 table = _wait_for_row(ref, ref.target)
                 if table is not None:
-                    tables[key] = table
-            target = config_table.row_by_name(table, ref.target) if table else None
+                    # One walk of the table per library, then dict lookups.
+                    by_name = {r.name: r for r in config_table.rows_of(table)}
+                    tables[key] = by_name
+            target = by_name.get(ref.target) if by_name else None
             if target is None:
                 problems.append(f'{ref.name}: "{ref.target}" never appeared in '
                                 f'the latest {ref.data_file.name}')

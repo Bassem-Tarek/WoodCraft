@@ -34,6 +34,7 @@ import adsk.fusion
 
 from .. import config
 from . import wc_attrs
+from . import entity_memo
 from . import nesting
 from . import sheets_store
 from . import settings_store
@@ -498,24 +499,43 @@ def _priced_hardware(component):
             and wc_attrs.get_purchase_mode(component) == config.WC_PURCHASE_PACK)
 
 
-def _make_instance(occ_or_comp, comp, dims, category, parent=''):
+def _make_instance(occ_or_comp, comp, dims, category, parent='', profile=None):
     L, W, T = dims
-    return {
-        'name': getattr(occ_or_comp, 'name', comp.name),
-        'comp_name': comp.name,
-        'parent': parent,
-        'category': category,
+    if profile is None:
+        profile = {}
+    if 'material' not in profile:
+        profile['material'] = panel_material(comp)
+    if 'cost' not in profile:
         # Only a pack-priced unit bills its own cost; a separate-mode assembly's
         # stored pack price must not ALSO be billed next to its children's.
-        'cost': wc_attrs.get_cost(comp) if _priced_hardware(comp) else 0.0,
+        priced = profile.get('priced')
+        if priced is None:
+            priced = _priced_hardware(comp)
+        profile['cost'] = wc_attrs.get_cost(comp) if priced else 0.0
+    if 'comp_name' not in profile:
+        profile['comp_name'] = comp.name
+    return {
+        'name': getattr(occ_or_comp, 'name', profile['comp_name']),
+        'comp_name': profile['comp_name'],
+        'parent': parent,
+        'category': category,
+        'cost': profile['cost'],
         'L': L, 'W': W, 'T': T,
-        'material': panel_material(comp),
+        'material': profile['material'],
         'component': comp,
         'occurrence': occ_or_comp,
     }
 
 
-def design_panel_materials(design):
+def _component_profile(comp):
+    """The per-COMPONENT facts the collector needs, read once. A cabinet placed
+    ten times shares its components, so every occurrence after the first reuses
+    these instead of re-reading attributes and re-measuring bodies."""
+    return {'category': wc_attrs.get_category(comp),
+            'priced': _priced_hardware(comp)}
+
+
+def design_panel_materials(design, instances=None):
     """Sorted, distinct Fusion material names found on panels in `design` — the
     exact strings Cut List matches against. Reused by the Sheets palette (to offer
     real names) and Cut List. Empty list if no design / none found."""
@@ -523,7 +543,7 @@ def design_panel_materials(design):
         return []
     found = set()
     try:
-        for it in collect_panel_instances(design):
+        for it in (instances if instances is not None else collect_panel_instances(design)):
             mat = (it.get('material') or '').strip()
             if mat:
                 found.add(mat)
@@ -532,7 +552,7 @@ def design_panel_materials(design):
     return sorted(found)
 
 
-def design_panel_groups(design):
+def design_panel_groups(design, instances=None):
     """[{'material','thickness','count'}] for the design's panels, grouped by
     (material name, thickness mm). Lets the Sheets palette show/offer the exact
     (name, thickness) combinations present in the design. Sorted by name, then
@@ -541,7 +561,7 @@ def design_panel_groups(design):
         return []
     groups = {}
     try:
-        for it in collect_panel_instances(design):
+        for it in (instances if instances is not None else collect_panel_instances(design)):
             mat = (it.get('material') or '').strip() or 'Unassigned'
             t = round(it['T'], 1)
             key = (mat, t)
@@ -575,43 +595,51 @@ def collect_instances(design, root=None, categories=None, root_name=''):
     root = root or design.rootComponent
     wanted = set(categories) if categories else None
     instances = []
+    memo = entity_memo.EntityMemo()
 
-    def consider(owner, comp, parent):
-        category = wc_attrs.get_category(comp)
+    def consider(owner, comp, parent, profile):
+        category = profile['category']
         if category is None or (wanted is not None and category not in wanted):
             return
-        dims = panel_dims_mm(comp)
+        if 'dims' not in profile:
+            profile['dims'] = panel_dims_mm(comp)
+        dims = profile['dims']
         if dims is None:
             # A sheet good (panel or worktop) needs a measurable size; a purchased
             # item is still counted.
             if category in config.WC_SHEET_LIKE:
                 return
             dims = (0.0, 0.0, 0.0)
-        instances.append(_make_instance(owner, comp, dims, category, parent))
+        instances.append(_make_instance(owner, comp, dims, category, parent, profile))
 
     def walk(occ, parent):
-        consider(occ, occ.component, parent)
+        comp = occ.component
+        profile = memo.get(comp, _component_profile)
+        consider(occ, comp, parent, profile)
         # A hardware component with its OWN price is a purchased unit: whatever
         # is inside it is already covered by that price, so descending would
         # double-count its children (e.g. a Minifix assembly priced as a whole
         # vs. its screw + cam priced individually — only one level may count).
-        if _priced_hardware(occ.component):
+        if profile['priced']:
             return
         # Descend with THIS occurrence's component name as its children's parent.
         try:
             children = occ.childOccurrences
         except Exception:
             return
-        child_parent = occ.component.name
+        if 'comp_name' not in profile:
+            profile['comp_name'] = comp.name
+        child_parent = profile['comp_name']
         for i in range(children.count):
             walk(children.item(i), child_parent)
 
     # The root component itself — covers scope set to a single leaf item. (For the
     # whole design the root is the assembly, which is unclassified, so this is a
     # no-op there.)
-    consider(root, root, root_name)
+    root_profile = _component_profile(root)
+    consider(root, root, root_name, root_profile)
 
-    if not _priced_hardware(root):
+    if not root_profile['priced']:
         occs = root.occurrences
         for i in range(occs.count):
             walk(occs.item(i), root_name)

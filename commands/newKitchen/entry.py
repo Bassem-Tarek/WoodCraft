@@ -101,6 +101,8 @@ _root = None
 _root_error = None
 _source = None             # master library — only resolved for the build fallback
 _source_error = None
+_taken = set()             # lower-cased folder names in _root (for name previews)
+_source_count = None       # files in the master library, counted on demand
 _persistent_handlers = []
 
 
@@ -178,10 +180,16 @@ def _resolve(project_type):
     """Look up the kitchens folder, the template to claim and (only if needed)
     the master library for one project type."""
     global _project_type, _template, _waiting, _root, _root_error, _source, _source_error
+    global _taken, _source_count
     _project_type = project_type or ''
     _root, _root_error = kitchen_data.kitchens_root(_project_type)
-    _template = kitchen_data.latest_template(_root) if _root else None
-    _waiting = len(kitchen_data.template_folders(_root)) if _root else 0
+    # One listing of the kitchens folder serves the template count, the choice of
+    # template and the "is this customer name free" check on every keystroke.
+    rows = kitchen_data.template_folders(_root, details=False) if _root else []
+    _template = kitchen_data.latest_template(_root, rows) if rows else None
+    _waiting = len(rows)
+    _taken = kitchen_data.child_folder_names(_root) if _root else set()
+    _source_count = None
 
     # Only look up the master library when it's actually needed — the normal
     # (template) path never touches it, and it's a network round trip.
@@ -189,6 +197,14 @@ def _resolve(project_type):
         _source, _source_error = kitchen_data.library_source_folder()
     else:
         _source, _source_error = None, None
+
+
+def _library_count():
+    """Files in the master library, counted once per dialog."""
+    global _source_count
+    if _source_count is None:
+        _source_count = kitchen_data.count_files(_source) if _source else 0
+    return _source_count
 
 
 def _can_run():
@@ -225,7 +241,7 @@ def _setup_body():
     # The fallback. Say plainly that this one is slow and why, so nobody thinks
     # Fusion has hung — and point at the fix for next time.
     return (f"<b>No kitchens are prepared and waiting</b>, so this one will be set "
-            f"up from scratch — copying {kitchen_data.count_files(_source)} "
+            f"up from scratch — copying {_library_count()} "
             f"cabinets into it takes a few minutes.<br>"
             f"<i>Run <b>Create Kitchen Template</b> when you have a spare moment "
             f"and the next one is instant.</i>")
@@ -253,7 +269,7 @@ def _update_preview(inputs):
         preview.formattedText = '<i>Type a customer name.</i>'
         return
     new_name = kitchen_data.unique_folder_name(
-        _root, kitchen_data.kitchen_folder_name(customer))
+        _root, kitchen_data.kitchen_folder_name(customer), _taken)
     preview.formattedText = (
         f"<b>Your kitchen will be</b><br>"
         f"{_where()} / <b>{new_name}</b><br>"

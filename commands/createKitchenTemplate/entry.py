@@ -78,6 +78,7 @@ CREATE_EVENT_ID = f'{config.COMPANY_NAME}_createKitchenTemplate_create'
 _create_event = None
 _pending_count = 0
 _pending_type = ''
+_pending_lookup = None     # root / source / file count the dialog already fetched
 _persistent_handlers = []
 
 
@@ -149,9 +150,35 @@ def _selected_type(inputs):
     return item.name if item else ''
 
 
+# Per-dialog cache: the cloud is asked once per project type (and once for the
+# library) however often the type or the count is changed. Cleared on destroy.
+_dialog_cache = {}
+
+
+def _root_info(project_type):
+    """(root, error, taken template numbers) for a type, cached for the dialog."""
+    key = ('root', project_type)
+    if key not in _dialog_cache:
+        root, error = kitchen_data.kitchens_root(project_type)
+        taken = ({row['number'] for row in
+                  kitchen_data.template_folders(root, details=False)}
+                 if root else set())
+        _dialog_cache[key] = (root, error, taken)
+    return _dialog_cache[key]
+
+
+def _source_info():
+    """(source, error, file count) for the master library, cached for the dialog."""
+    if 'source' not in _dialog_cache:
+        source, error = kitchen_data.library_source_folder()
+        count = kitchen_data.count_files(source) if source is not None else 0
+        _dialog_cache['source'] = (source, error, count)
+    return _dialog_cache['source']
+
+
 def _refresh(inputs):
     project_type = _selected_type(inputs)
-    root, root_error = kitchen_data.kitchens_root(project_type)
+    root, root_error, _taken = _root_info(project_type)
     inputs.itemById(INFO_ID).formattedText = _setup_summary(project_type, root, root_error)
     _update_preview(inputs, root, root_error)
 
@@ -166,12 +193,11 @@ def _setup_summary(project_type, root, root_error):
     lines.append(_status_line('Kitchens', kitchen_data.kitchens_where(project_type),
                               root is not None))
 
-    source, source_error = kitchen_data.library_source_folder()
-    label = config.LIBRARY_SOURCE_FOLDER or '(project root)'
-    lines.append(_status_line('Library', f'{config.LIBRARY_PROJECT_NAME} / {label}',
+    source, source_error, source_count = _source_info()
+    lines.append(_status_line('Library', kitchen_data.library_where(),
                               source is not None))
     if source is not None:
-        lines.append(f'<i>{kitchen_data.count_files(source)} cabinet file(s) will be '
+        lines.append(f'<i>{source_count} cabinet file(s) will be '
                      f'copied into each template.</i>')
     for error in (root_error, source_error):
         if error:
@@ -189,7 +215,8 @@ def command_input_changed(args: adsk.core.InputChangedEventArgs):
     if args.input.id == TYPE_ID:
         _refresh(inputs)
     elif args.input.id == COUNT_ID:
-        _update_preview(inputs, *kitchen_data.kitchens_root(_selected_type(inputs)))
+        root, error, _taken = _root_info(_selected_type(inputs))
+        _update_preview(inputs, root, error)
 
 
 def _update_preview(inputs, root, error):
@@ -201,7 +228,9 @@ def _update_preview(inputs, root, error):
     count = inputs.itemById(COUNT_ID).value
     # Names are predicted by pretending each one already exists, so a batch shows
     # the real numbers it will take rather than the same one repeated.
-    taken = {row['number'] for row in kitchen_data.template_folders(root)}
+    _root, _error, known = _root_info(_selected_type(inputs))
+    waiting = len(known)
+    taken = set(known)
     names, number = [], 1
     prefix = (config.KITCHEN_TEMPLATE_PREFIX or 'Kitchen Template').strip()
     while len(names) < min(count, 4):
@@ -214,7 +243,6 @@ def _update_preview(inputs, root, error):
         shown += f' … (+{count - len(names)} more)'
 
     where = kitchen_data.kitchens_where(_selected_type(inputs))
-    waiting = len(kitchen_data.template_folders(root))
     preview.formattedText = (
         f"<b>Will create in</b> {where}<br>{shown}<br>"
         f"<i>{waiting} template(s) already waiting there.</i>")
@@ -226,6 +254,13 @@ def command_execute(args: adsk.core.CommandEventArgs):
     inputs = args.command.commandInputs
     _pending_count = int(inputs.itemById(COUNT_ID).value or 0)
     _pending_type = _selected_type(inputs)
+    # Carry what the dialog already fetched into the build, so it doesn't walk the
+    # cloud again for the same answers.
+    global _pending_lookup
+    root, _error, taken = _root_info(_pending_type)
+    source, _error, source_count = _source_info()
+    _pending_lookup = {'root': root, 'source': source, 'count': source_count,
+                       'taken': set(taken)}
     kitchen_data.remember_project_type(_pending_type)
     if _pending_count > 0:
         app.fireCustomEvent(CREATE_EVENT_ID)
@@ -235,6 +270,7 @@ def command_destroy(args: adsk.core.CommandEventArgs):
     futil.log(f'{CMD_NAME} Command Destroy Event')
     global local_handlers
     local_handlers = []
+    _dialog_cache.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -254,17 +290,28 @@ def _on_create_event(args: adsk.core.CustomEventArgs):
 
 
 def _build_templates(count, project_type):
-    root, error = kitchen_data.kitchens_root(project_type)
-    if not root:
-        ui.messageBox(error, CMD_NAME)
-        return
+    global _pending_lookup
+    lookup, _pending_lookup = _pending_lookup or {}, None
+    root = lookup.get('root')
+    if root is None:
+        root, error = kitchen_data.kitchens_root(project_type)
+        if not root:
+            ui.messageBox(error, CMD_NAME)
+            return
 
-    source, error = kitchen_data.library_source_folder()
-    if not source:
-        ui.messageBox(error, CMD_NAME)
-        return
+    source = lookup.get('source')
+    if source is None:
+        source, error = kitchen_data.library_source_folder()
+        if not source:
+            ui.messageBox(error, CMD_NAME)
+            return
 
-    per_template = max(1, kitchen_data.count_files(source))
+    per_template = max(1, lookup.get('count') or kitchen_data.count_files(source))
+    # The numbers in use, listed once; each new template claims the lowest free
+    # one and is added here, so the folder isn't re-listed for every template.
+    # Re-listed now (not taken from the dialog) in case someone else made one.
+    taken = {row['number'] for row in
+             kitchen_data.template_folders(root, details=False)}
     progress_dialog = ui.createProgressDialog()
     progress_dialog.isCancelButtonShown = True
     progress_dialog.show(CMD_NAME, 'Preparing…', 0, per_template * count, 0)
@@ -273,7 +320,11 @@ def _build_templates(count, project_type):
     done_before = 0
     try:
         for index in range(count):
-            name = kitchen_data.next_template_name(root)
+            name = kitchen_data.next_template_name(root, taken)
+            try:
+                taken.add(int(name.rsplit(' ', 1)[-1]))
+            except ValueError:
+                pass
             progress_dialog.message = f'{name} — %v of %m'
             adsk.doEvents()
             if progress_dialog.wasCancelled:

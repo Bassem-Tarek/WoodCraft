@@ -34,6 +34,7 @@ module is unit-testable with plain Python.
 import json
 import os
 
+from . import file_cache
 from . import sheets_store
 
 DEFAULTS = {
@@ -67,7 +68,11 @@ def normalize(data):
 
 def load():
     """Settings dict from disk, defaults for anything missing/corrupt. Never
-    raises and never writes."""
+    raises and never writes. Cached until the file changes (see file_cache)."""
+    return file_cache.cached(settings_path(), _load_from_disk)
+
+
+def _load_from_disk():
     try:
         with open(settings_path(), 'r', encoding='utf-8') as f:
             return normalize(json.load(f))
@@ -82,6 +87,7 @@ def save(settings):
     os.makedirs(sheets_store.library_dir(), exist_ok=True)
     with open(settings_path(), 'w', encoding='utf-8') as f:
         json.dump(cleaned, f, indent=2)
+    file_cache.forget(settings_path())
     return cleaned
 
 

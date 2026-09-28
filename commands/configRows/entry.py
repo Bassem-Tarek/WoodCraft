@@ -268,8 +268,10 @@ def command_execute(args: adsk.core.CommandEventArgs):
 def _create():
     """Runs after the dialog has closed, where the document settles normally.
 
-    Delete, then rename, then create — planning afresh after each step that
-    changes the table, because row indexes and free names move with it."""
+    Delete, then rename, then create — from ONE plan. Renames find their rows
+    by id, so deleting duplicates first doesn't invalidate the plan, and the
+    combinations still missing don't change when rows are renamed; reading the
+    whole table again between steps (as earlier builds did) only cost time."""
     design = adsk.fusion.Design.cast(app.activeProduct)
     if not design:
         return
@@ -287,23 +289,13 @@ def _create():
     if result.to_delete:
         deleted, delete_problems = config_table.delete_duplicates(design, result)
         problems.extend(delete_problems)
-        result = config_table.plan(design, name, rename=True, dedupe=True)
-        if result.error:
-            ui.messageBox('\n'.join([f'Deleted {deleted} duplicate(s).', '',
-                                     result.error]), CMD_NAME)
-            return
     lines.append(f'Deleted {deleted} duplicate configuration(s).')
 
-    # 2. Rename what is left.
+    # 2. Rename what is left, straight to the naming scheme.
     renamed = 0
     if result.to_rename:
         renamed, rename_problems = config_table.rename(design, result)
         problems.extend(rename_problems)
-        result = config_table.plan(design, name, rename=False, dedupe=True)
-        if result.error:
-            ui.messageBox('\n'.join(lines + [f'Renamed {renamed}.', '',
-                                             result.error]), CMD_NAME)
-            return
     lines.append(f'Renamed {renamed} configuration(s).')
 
     # 3. Fill in every combination still missing.
