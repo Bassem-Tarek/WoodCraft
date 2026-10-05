@@ -29,14 +29,16 @@ pin, so it sits above the hole centre) are taken out of the arithmetic first, wh
 is what makes the gap under the first shelf match the gap over the last one. Leave the top/bottom selection empty and the side panel's own ends are used
 instead (the old whole-panel behaviour).
 
-Live-parametric build: the command creates wc_lb_* user parameters and a feature
-tree (sketch -> seed HoleFeature -> rectangular pattern) driven by them, so editing
-the parameters reflows the holes. The opening is associative too — the bottom and
-top datums are the picked panels' faces intersected with the sketch plane, and the
-spacing is driven by a reference dimension across them, so moving a panel or
-changing its thickness redistributes the holes. If any step of the parametric
-build fails, it rolls back and falls back to a plain (numeric) HoleFeature over
-every computed point, so the command always produces correct holes.
+Live-parametric, fully defined build: per panel the command creates wc_lb_* user
+parameters and a feature tree driven by them:
+  LB Opening sketch (bottom/top datums + driven opening dimension, hidden)
+  -> LB Holes sketch (6 seed points, each locked by two driving dimensions)
+  -> seed HoleFeature -> rectangular pattern.
+Every datum is the picked faces intersected with the sketch plane or the side
+panel's projected edges, so both sketches are fully constrained and moving a
+panel, changing a thickness or resizing the cabinet reflows the holes. If the live
+build fails it rolls back and drills the same holes in a fixed (but still fully
+dimensioned) sketch, and tells the user which panels that happened to.
 """
 
 import os
@@ -388,6 +390,7 @@ def command_execute(args: adsk.core.CommandEventArgs):
     bp_world = _back_ref_world(inputs)           # world point on the back panel face
 
     bored = 0
+    fallbacks = []   # (panel name, reason) for panels that could not be built live-parametric
     for face in faces:
         try:
             native = face.nativeObject if face.nativeObject else face
@@ -401,12 +404,23 @@ def command_execute(args: adsk.core.CommandEventArgs):
             p_native['bottom_h'], p_native['top_h'] = _span_heights(
                 fr_native, _span_native(face, span_sel))
             rule.validate(fr_native, p_native)   # raises ValueError with a message
-            _bore_one(comp, face, native, back_proxy, front_edge, bp_world, span_sel, params)
+            reason = _bore_one(comp, face, native, back_proxy, front_edge, bp_world, span_sel, params)
+            if reason:
+                fallbacks.append((comp.name, reason))
             bored += 1
         except ValueError as ve:
             ui.messageBox(str(ve), CMD_NAME)
         except Exception:
             futil.handle_error(f'{CMD_NAME}: failed to bore a panel')
+
+    if fallbacks:
+        # Never fall back silently: the user needs to know these holes will NOT
+        # follow later model changes.
+        lines = '\n'.join(f'• {name}: {why}' for name, why in fallbacks)
+        ui.messageBox(
+            'The holes were drilled, but on these panels they are not fully linked to '
+            'the model and may not follow later size changes:\n\n'
+            f'{lines}', CMD_NAME)
 
     if bored == 0 and faces:
         ui.messageBox('No panels were bored — see the messages above.', CMD_NAME)
@@ -437,38 +451,44 @@ def _set_bore_direction(hole_input, sketch, fr):
     plane ends up oriented. A cabinet's two gables have mirror-opposite — and often
     topologically reversed — faces, so a fixed flip is correct for one and wrong for
     the other. The hole's default direction is opposite the sketch's own normal, so
-    compare that normal to the into-material bore direction and flip when they agree.
-    Guarded because the property name varies across API versions."""
-    try:
-        sk_normal = sketch.xDirection.crossProduct(sketch.yDirection)
-        sk_normal.normalize()
-        hole_input.isDefaultDirectionFlipped = sk_normal.dotProduct(fr.bore_dir) > 0
-    except Exception:
-        pass
+    compare that normal to the into-material bore direction and reverse the hole
+    when they agree. (The property is ``isDefaultDirection``; the API silently
+    accepts misspelt attributes, so a wrong name here fails without any error.)"""
+    sk_normal = sketch.xDirection.crossProduct(sketch.yDirection)
+    sk_normal.normalize()
+    hole_input.isDefaultDirection = not (sk_normal.dotProduct(fr.bore_dir) > 0)
 
 
 def _bore_one(comp, proxy_face, native_face, back_proxy, front_edge, bp_world, span_sel, params):
     """Try the live-parametric build (associative datums + seed + height pattern); if
     any step throws, roll back the partial features and fall back to explicit holes
-    on the native face, which always build correctly. Either way the panel is bored."""
+    on the native face, which always build correctly. Either way the panel is bored.
+
+    Returns None for a fully live build, else a note on what is NOT live."""
     created = []
     try:
-        _build_parametric(comp, proxy_face, back_proxy, front_edge, bp_world, span_sel,
-                          params, created)
-    except Exception:
+        return _build_parametric(comp, proxy_face, back_proxy, front_edge, bp_world,
+                                 span_sel, params, created)
+    except Exception as ex:
         for feat in reversed(created):
             try:
                 feat.deleteMe()
             except Exception:
                 pass
-        futil.log(f'{CMD_NAME}: parametric build failed; using explicit holes', force_console=True)
+        reason = (str(ex) or ex.__class__.__name__) + ' — holes placed at fixed positions'
+        futil.log(f'{CMD_NAME}: parametric build failed ({reason}); using explicit holes',
+                  force_console=True)
         _build_explicit(comp, proxy_face, native_face, bp_world, span_sel, params)
+        return reason
 
 
 def _build_explicit(comp, proxy_face, native_face, bp_world, span_sel, params):
-    """Robust fallback: drill every computed centre with one HoleFeature at fixed
-    positions on the native face — no pattern, no cross-component refs, so it always
-    builds. Not reflow-on-edit (the parametric path provides that)."""
+    """Robust fallback: drill every computed centre with one HoleFeature on the
+    native face — no pattern, no cross-component refs, so it always builds. The
+    sketch is still FULLY DEFINED: each point is dimensioned off the side panel's
+    own projected bottom edge and its back (or front) edge, so the holes stay put
+    relative to the panel. It does not redistribute when the opening changes (the
+    parametric path provides that)."""
     up, front_refs = _ref_axes(proxy_face)
     bp_native = _to_native_point(proxy_face, bp_world)
     fr = boring.frame(native_face, up=up, front_refs=front_refs, back_ref_point=bp_native)
@@ -478,9 +498,42 @@ def _build_explicit(comp, proxy_face, native_face, bp_world, span_sel, params):
     plan = boring.RULES[0].build_plan(fr, p)
 
     sketch = comp.sketches.add(native_face)
+    _name_sketch(sketch, f'LB Holes (fixed) {comp.name}')
+
+    # Panel-edge datums (projected = fixed reference geometry). Any that can't be
+    # found just leaves those points un-dimensioned rather than failing the bore.
+    def _proj(edge):
+        try:
+            return _project_line(sketch, edge) if edge is not None else None
+        except Exception:
+            return None
+
+    bottom_line = _proj(_find_edge(native_face, fr, along=fr.depth_dir, minimize=fr.height_dir,
+                                   min_len=fr.depth * 0.5))
+    back_line = _proj(_find_edge(native_face, fr, along=fr.height_dir, minimize=fr.depth_dir,
+                                 min_len=fr.height * 0.5))
+    front_line = _proj(_find_edge(native_face, fr, along=fr.height_dir,
+                                  minimize=_neg(fr.depth_dir), min_len=fr.height * 0.5))
+
+    dims = sketch.sketchDimensions
     point_coll = adsk.core.ObjectCollection.create()
     for model_pt in plan['all_points']:
-        point_coll.add(sketch.sketchPoints.add(sketch.modelToSketchSpace(model_pt)))
+        sk_pt = sketch.modelToSketchSpace(model_pt)
+        sp = sketch.sketchPoints.add(sk_pt)
+        point_coll.add(sp)
+        v = fr.origin.vectorTo(model_pt)
+        h = v.dotProduct(fr.height_dir)
+        d = v.dotProduct(fr.depth_dir)
+        is_back = d < fr.depth / 2.0
+        datum = back_line if is_back else front_line
+        d_val = d if is_back else fr.depth - d
+        try:
+            if bottom_line is not None:
+                dims.addOffsetDimension(bottom_line, sp, sk_pt).parameter.value = h
+            if datum is not None:
+                dims.addOffsetDimension(datum, sp, sk_pt).parameter.value = d_val
+        except Exception:
+            pass   # the point is already at the right place; only its lock is lost
 
     holes = comp.features.holeFeatures
     hin = holes.createSimpleInput(adsk.core.ValueInput.createByReal(plan['dia_cm']))
@@ -490,20 +543,64 @@ def _build_explicit(comp, proxy_face, native_face, bp_world, span_sel, params):
     holes.add(hin)
 
 
+def _name_sketch(sketch, name):
+    try:
+        sketch.name = name
+    except Exception:
+        pass
+
+
+def _bottom_datum(sketch, proxy_face, fr, bottom_ref):
+    """The bottom datum line in ``sketch``: the picked bottom panel's face where it
+    crosses the sketch plane, else the side panel's own (projected) bottom edge.
+    Both are fixed, associative reference geometry."""
+    if bottom_ref is not None:
+        line = _intersect_line(sketch, bottom_ref[1])
+        if line is None:
+            raise RuntimeError('the bottom panel face does not cross the side panel')
+        return line
+    edge = _find_edge(proxy_face, fr, along=fr.depth_dir, minimize=fr.height_dir,
+                      min_len=fr.depth * 0.5)
+    if edge is None:
+        raise RuntimeError('could not find the side panel\'s bottom edge')
+    return _project_line(sketch, edge)
+
+
+def _top_datum(sketch, proxy_face, fr, top_ref):
+    """The top datum line: the picked top panel's face (intersected), else the side
+    panel's own top edge (projected). None only when neither can be found."""
+    if top_ref is not None:
+        line = _intersect_line(sketch, top_ref[1])
+        if line is None:
+            raise RuntimeError('the top panel face does not cross the side panel')
+        return line
+    edge = _find_edge(proxy_face, fr, along=fr.depth_dir, minimize=_neg(fr.height_dir),
+                      min_len=fr.depth * 0.5)
+    return _project_line(sketch, edge) if edge is not None else None
+
+
 def _build_parametric(comp, proxy_face, back_proxy, front_edge, bp_world, span_sel,
                       params, created):
-    """Live-parametric build, Shelf-Creator style: the sketch is created on the side
-    panel face in ASSEMBLY context, so it can reference other components. Datums are
-    real, associative geometry — the back column is dimensioned off the back-panel
-    face INTERSECTED with the sketch plane, the front column off the (projected)
-    front edge, and heights off the BOTTOM PANEL's face (also intersected), with the
-    spacing driven by a reference dimension up to the TOP PANEL's face. A single
-    height rectangular pattern (qty N) replicates the seed set up the opening. So
-    changing a panel's thickness, or moving the bottom/top panels, moves and
-    redistributes the holes with the references."""
-    if back_proxy is None:
-        raise RuntimeError('Back panel face is required for the parametric build.')
+    """Live-parametric, FULLY DEFINED build. Two sketches on the side panel face,
+    both in assembly context so they can reference the other panels:
 
+    1. ``LB Opening`` — the bottom and top datums (the picked bottom/top panels'
+       faces intersected with the sketch plane, or the side panel's own ends) and a
+       DRIVEN dimension across them. Its parameter (wc_lb_H_<panel>) is the live
+       clear opening. Kept in its own hidden sketch so the hole sketch holds only
+       the holes and their locks (older Fusion builds also only accepted driven
+       parameters in expressions outside their own sketch).
+    2. ``LB Holes`` — the seed set of both columns. Every point carries two driving
+       dimensions: height off the bottom datum (an expression of wc_lb_H, N, shelf,
+       rise, pitch) and depth off the back datum (back panel face, else the side
+       panel's back edge) or the front datum (picked/auto-detected front edge). The
+       pattern-direction line joins two seed points, so it adds no free geometry.
+       Datums are all intersected/projected (fixed) geometry, so the sketch is fully
+       constrained.
+
+    A HoleFeature over the 6 seed points and a rectangular pattern (qty N, spacing
+    gap + shelf) complete it. Moving a panel, changing a thickness, or resizing the
+    cabinet moves the datums, the opening parameter follows, and the holes reflow."""
     # World frame from the assembly-context proxy face (matches the sketch space).
     fr = boring.frame(proxy_face, back_ref_point=bp_world)
     p = dict(params)
@@ -514,113 +611,115 @@ def _build_parametric(comp, proxy_face, back_proxy, front_edge, bp_world, span_s
 
     design = adsk.fusion.Design.cast(app.activeProduct)
     # Each Line Boring instance gets its own wc_lb_* parameters (name-suffixed per
-    # component + occurrence), so a second run — on another area of the same panel,
-    # or on a different panel entirely — can't clobber the parameters an earlier
-    # instance's sketch dimensions, hole, and pattern still reference. Without this,
-    # both instances share the same global wc_lb_N/wc_lb_dia/etc., and the later run
-    # silently rewrites them to its own values, which can invalidate the earlier
-    # instance's geometry (that's the "previous pattern turns red" bug).
+    # component + occurrence), so a second run can't clobber the parameters an
+    # earlier instance's sketch dimensions, hole and pattern still reference.
     suffix = _unique_instance_suffix(design, _safe_name(comp.name))
     plan = boring.RULES[0].build_plan(fr, p, suffix=suffix)
     _ensure_params(design, plan['params'])
 
-    sketch = comp.sketches.add(proxy_face)
-    created.append(sketch)
-
-    # Associative datums. The bottom datum is the picked bottom panel's face where it
-    # crosses this sketch plane (so the first set tracks that panel); with no bottom
-    # panel picked it falls back to the side panel's own bottom edge. A picked face
-    # that fails to intersect raises, which drops the whole panel to the explicit
-    # fallback rather than silently boring a different (panel-based) spacing.
-    if bottom_ref is not None:
-        bottom_line = _intersect_line(sketch, bottom_ref[1])
-        if bottom_line is None:
-            raise RuntimeError('The bottom panel face does not cross the side panel sketch plane.')
-    else:
-        bottom_edge = _find_edge(proxy_face, fr, along=fr.depth_dir, minimize=fr.height_dir,
-                                 min_len=fr.depth * 0.5)
-        if bottom_edge is None:
-            raise RuntimeError('Could not identify the panel bottom edge.')
-        bottom_line = _project_line(sketch, bottom_edge)
-
-    # Top datum: the picked top panel's face, else the side panel's own top edge.
-    if top_ref is not None:
-        top_line = _intersect_line(sketch, top_ref[1])
-        if top_line is None:
-            raise RuntimeError('The top panel face does not cross the side panel sketch plane.')
-    else:
-        top_edge = _find_edge(proxy_face, fr, along=fr.depth_dir, minimize=_neg(fr.height_dir),
-                              min_len=fr.depth * 0.5)
-        top_line = _project_line(sketch, top_edge) if top_edge is not None else None
-
-    back_line = _intersect_line(sketch, back_proxy)   # where the back panel crosses this plane
-    if back_line is None:
-        raise RuntimeError('The back panel face does not cross the panel sketch plane.')
-
-    front_ref = front_edge if front_edge is not None else _find_edge(
-        proxy_face, fr, along=fr.height_dir, minimize=_neg(fr.depth_dir), min_len=fr.height * 0.5)
-    if front_ref is None:
-        raise RuntimeError('Could not identify the panel front edge (pick one).')
-    front_line = _project_line(sketch, front_ref)
-
-    # Deterministic +height direction for the pattern (drawn, not read off an edge).
-    up_line = _dir_line(sketch, fr, fr.height_dir, fr.height)
-
-    dims = sketch.sketchDimensions
-
-    # Live opening token: a DRIVEN reference dimension from the bottom datum to the
-    # top datum measures the CLEAR OPENING between the two panels, so spacing =
-    # opening/(N+1) tracks them — move a panel, change its thickness or drive it from
-    # the user's own parameters and the holes redistribute. Falls back to a baked
-    # number if the dimension can't be made.
-    h_token = f'({plan["span_mm"]})'
-    if top_line is not None:
+    # ---- Sketch 1: the live opening -------------------------------------------
+    baked_h = f'({plan["span_mm"]})'
+    h_token = baked_h
+    open_sk = comp.sketches.add(proxy_face)
+    created.append(open_sk)
+    _name_sketch(open_sk, f'LB Opening {suffix}')
+    o_bottom = _bottom_datum(open_sk, proxy_face, fr, bottom_ref)
+    o_top = _top_datum(open_sk, proxy_face, fr, top_ref)
+    if o_top is not None:
         try:
-            h_ref = dims.addOffsetDimension(
-                bottom_line, top_line,
-                sketch.modelToSketchSpace(fr.point(fr.height / 2.0, fr.depth / 2.0)), False)
+            h_ref = open_sk.sketchDimensions.addOffsetDimension(
+                o_bottom, o_top,
+                open_sk.modelToSketchSpace(fr.point(fr.height / 2.0, fr.depth / 2.0)), False)
             hp = h_ref.parameter
-            # Give the auto-named (d###) reference dimension a clear, unique name +
-            # comment so it reads as "the opening that drives the hole spacing".
             try:
-                hp.name = _unique_param_name(design, _safe_name(f'{boring.PFX}H_{comp.name}'))
+                hp.name = _unique_param_name(design, f'{boring.PFX}H_{suffix}')
                 hp.comment = ('Line boring: clear opening between the bottom and top '
                               'panels (drives shelf-pin spacing)')
             except Exception:
                 pass
             h_token = hp.name
         except Exception:
-            h_token = f'({plan["span_mm"]})'
+            h_token = baked_h
+    try:
+        open_sk.isVisible = False
+    except Exception:
+        pass
 
-    # The clear gap left once the shelves themselves are taken out of the opening:
-    # gap = (opening - N * shelf) / (N + 1). The first set sits a gap up from the
-    # bottom datum MINUS the pin rise, because the shelf lands above its hole centre;
-    # each following set is one gap plus one shelf higher. Every expression is live,
-    # so changing the shelf thickness or the opening reflows the whole column.
+    # ---- Sketch 2: the seed holes ---------------------------------------------
+    sketch = comp.sketches.add(proxy_face)
+    created.append(sketch)
+    _name_sketch(sketch, f'LB Holes {suffix}')
+
+    bottom_line = _bottom_datum(sketch, proxy_face, fr, bottom_ref)
+
+    if back_proxy is not None:
+        back_line = _intersect_line(sketch, back_proxy)   # where the back panel crosses
+        if back_line is None:
+            raise RuntimeError('the back panel face does not cross the side panel')
+    else:
+        # No back panel picked: the back column is measured from the side panel's
+        # own back edge (matches the preview, where back_depth is 0).
+        back_edge = _find_edge(proxy_face, fr, along=fr.height_dir, minimize=fr.depth_dir,
+                               min_len=fr.height * 0.5)
+        if back_edge is None:
+            raise RuntimeError('could not find the side panel\'s back edge (pick the back panel)')
+        back_line = _project_line(sketch, back_edge)
+
+    front_ref = front_edge if front_edge is not None else _find_edge(
+        proxy_face, fr, along=fr.height_dir, minimize=_neg(fr.depth_dir), min_len=fr.height * 0.5)
+    if front_ref is None:
+        raise RuntimeError('could not find the side panel\'s front edge (pick one)')
+    front_line = _project_line(sketch, front_ref)
+
     n_expr, shelf_expr, rise_expr, pitch_expr = (
         plan['n_expr'], plan['shelf_expr'], plan['rise_expr'], plan['pitch_expr'])
-    gap_expr = f'(({h_token} - {n_expr} * {shelf_expr}) / ({n_expr} + 1))'
-    first_expr = f'({gap_expr} - {rise_expr})'
-    step_expr = f'({gap_expr} + {shelf_expr})'
-    height_exprs = {
-        'mid': first_expr,
-        'up': f'{first_expr} + {pitch_expr}',
-        'low': f'{first_expr} - {pitch_expr}',
-    }
 
-    # Seed = first set of BOTH columns; heights measured up from the bottom datum,
-    # depth dimensioned to the matching column datum.
+    def exprs(h):
+        # gap = (opening - N*shelf)/(N+1); the first set sits a gap up from the
+        # bottom datum minus the pin rise (the shelf rests above its hole centre);
+        # each following set is one gap plus one shelf higher.
+        gap = f'(({h} - {n_expr} * {shelf_expr}) / ({n_expr} + 1))'
+        first = f'({gap} - {rise_expr})'
+        return ({'mid': first,
+                 'up': f'{first} + {pitch_expr}',
+                 'low': f'{first} - {pitch_expr}'},
+                f'({gap} + {shelf_expr})')
+
+    height_exprs, step_expr = exprs(h_token)
+
+    dims = sketch.sketchDimensions
     seed_points = []
+    by_key = {}
     for item in plan['seed']:
-        sp = sketch.sketchPoints.add(sketch.modelToSketchSpace(item['pt']))
-        seed_points.append(sp)
         text_pt = sketch.modelToSketchSpace(item['pt'])
+        sp = sketch.sketchPoints.add(text_pt)
+        seed_points.append(sp)
+        by_key[(item['col'], item['variant'])] = sp
         h_dim = dims.addOffsetDimension(bottom_line, sp, text_pt)
-        h_dim.parameter.expression = height_exprs[item['variant']]
+        try:
+            h_dim.parameter.expression = height_exprs[item['variant']]
+        except Exception:
+            if h_token == baked_h:
+                raise
+            # This Fusion build won't take the driven opening here: bake the
+            # opening for the whole panel (still fully defined, still follows the
+            # bottom/back/front panels, just no longer redistributes) and say so.
+            futil.log(f'{CMD_NAME}: opening parameter rejected; baking the opening',
+                      force_console=True)
+            h_token = baked_h
+            height_exprs, step_expr = exprs(h_token)
+            h_dim.parameter.expression = height_exprs[item['variant']]
         datum = back_line if item['col'] == 'back' else front_line
         off_expr = plan['back_expr'] if item['col'] == 'back' else plan['front_expr']
         d_dim = dims.addOffsetDimension(datum, sp, text_pt)
         d_dim.parameter.expression = off_expr
+
+    # Pattern direction: a construction line from the back column's LOW seed hole to
+    # its UP seed hole. Both ends are already-dimensioned seed points, so the line
+    # adds no degrees of freedom and always points up the panel.
+    up_line = sketch.sketchCurves.sketchLines.addByTwoPoints(
+        by_key[('back', 'low')], by_key[('back', 'up')])
+    up_line.isConstruction = True
 
     # One HoleFeature over the 6 seed points.
     dia_expr, depth_expr = plan['hole']
@@ -635,10 +734,7 @@ def _build_parametric(comp, proxy_face, back_proxy, front_edge, bp_world, span_s
     hole_feat = holes.add(hin)
     created.append(hole_feat)
 
-    # Height pattern only: replicate the seed set up the opening (qty N, spacing
-    # gap + shelf — one clear gap plus the shelf that sits in it, from the SAME live
-    # expressions used for the seed, so the whole column redistributes when the
-    # bottom/top panels move or the shelf thickness changes).
+    # Height pattern: qty N at (gap + shelf), from the same live expressions.
     pattern_ent = adsk.core.ObjectCollection.create()
     pattern_ent.add(hole_feat)
     patterns = comp.features.rectangularPatternFeatures
@@ -649,6 +745,14 @@ def _build_parametric(comp, proxy_face, back_proxy, front_edge, bp_world, span_s
         adsk.fusion.PatternDistanceType.SpacingPatternDistanceType)
     pattern_feat = patterns.add(pin)
     created.append(pattern_feat)
+
+    if not sketch.isFullyConstrained:
+        futil.log(f'{CMD_NAME}: hole sketch for {comp.name} is not fully constrained',
+                  force_console=True)
+    if h_token == baked_h:
+        return ('the bottom-to-top opening could not be measured live, so the holes '
+                'follow the panels but will not re-spread if the opening height changes')
+    return None
 
 
 def _ensure_params(design, specs):
@@ -707,21 +811,13 @@ def _unique_instance_suffix(design, base: str) -> str:
             pass
     candidate = base
     i = 2
-    while f'{boring.PFX}N_{candidate}' in existing:
+    # Check the opening (H_) name too: an older run may have left a wc_lb_H_<panel>
+    # behind, which would otherwise push this run's opening to a mismatched _2 name.
+    while (f'{boring.PFX}N_{candidate}' in existing
+           or f'{boring.PFX}H_{candidate}' in existing):
         candidate = f'{base}_{i}'
         i += 1
     return candidate
-
-
-def _dir_line(sketch, fr, vec, length):
-    """A construction line from the frame origin along ``vec`` (length cm). Both
-    endpoints are computed, so the line's direction in model space is exactly +vec —
-    a deterministic direction reference for the rectangular pattern."""
-    start = sketch.modelToSketchSpace(fr.origin)
-    end = sketch.modelToSketchSpace(_translated(fr.origin, vec, length))
-    line = sketch.sketchCurves.sketchLines.addByTwoPoints(start, end)
-    line.isConstruction = True
-    return line
 
 
 def _find_edge(face, fr, along: adsk.core.Vector3D, minimize: adsk.core.Vector3D, min_len: float):
