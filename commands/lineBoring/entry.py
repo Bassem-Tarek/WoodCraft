@@ -470,9 +470,17 @@ def _bore_one(comp, proxy_face, native_face, back_proxy, front_edge, bp_world, s
         return _build_parametric(comp, proxy_face, back_proxy, front_edge, bp_world,
                                  span_sel, params, created)
     except Exception as ex:
-        for feat in reversed(created):
+        # Undo in reverse: features/sketches first, then the wc_lb_* user parameters
+        # this run created (left behind they'd show up as orphaned _2 parameters).
+        design = adsk.fusion.Design.cast(app.activeProduct)
+        for item in reversed(created):
             try:
-                feat.deleteMe()
+                if isinstance(item, tuple) and item[0] == 'param':
+                    up = design.userParameters.itemByName(item[1])
+                    if up:
+                        up.deleteMe()
+                else:
+                    item.deleteMe()
             except Exception:
                 pass
         reason = (str(ex) or ex.__class__.__name__) + ' — holes placed at fixed positions'
@@ -551,13 +559,14 @@ def _name_sketch(sketch, name):
 
 
 def _bottom_datum(sketch, proxy_face, fr, bottom_ref):
-    """The bottom datum line in ``sketch``: the picked bottom panel's face where it
-    crosses the sketch plane, else the side panel's own (projected) bottom edge.
-    Both are fixed, associative reference geometry."""
+    """The bottom datum line in ``sketch``: ``bottom_ref`` (the picked bottom panel's
+    face, or the hidden plane extending it — see _datum_source) where it meets the
+    sketch plane, else the side panel's own (projected) bottom edge. All of these
+    are fixed, associative reference geometry."""
     if bottom_ref is not None:
-        line = _intersect_line(sketch, bottom_ref[1])
+        line = _face_datum_line(sketch, bottom_ref, fr, fr.depth_dir)
         if line is None:
-            raise RuntimeError('the bottom panel face does not cross the side panel')
+            raise RuntimeError('could not reference the bottom panel face')
         return line
     edge = _find_edge(proxy_face, fr, along=fr.depth_dir, minimize=fr.height_dir,
                       min_len=fr.depth * 0.5)
@@ -567,12 +576,13 @@ def _bottom_datum(sketch, proxy_face, fr, bottom_ref):
 
 
 def _top_datum(sketch, proxy_face, fr, top_ref):
-    """The top datum line: the picked top panel's face (intersected), else the side
-    panel's own top edge (projected). None only when neither can be found."""
+    """The top datum line: ``top_ref`` (the picked top panel's face or its extending
+    plane) where it meets the sketch plane, else the side panel's own top edge
+    (projected). None only when neither can be found."""
     if top_ref is not None:
-        line = _intersect_line(sketch, top_ref[1])
+        line = _face_datum_line(sketch, top_ref, fr, fr.depth_dir)
         if line is None:
-            raise RuntimeError('the top panel face does not cross the side panel')
+            raise RuntimeError('could not reference the top panel face')
         return line
     edge = _find_edge(proxy_face, fr, along=fr.depth_dir, minimize=_neg(fr.height_dir),
                       min_len=fr.depth * 0.5)
@@ -615,7 +625,19 @@ def _build_parametric(comp, proxy_face, back_proxy, front_edge, bp_world, span_s
     # earlier instance's sketch dimensions, hole and pattern still reference.
     suffix = _unique_instance_suffix(design, _safe_name(comp.name))
     plan = boring.RULES[0].build_plan(fr, p, suffix=suffix)
-    _ensure_params(design, plan['params'])
+    created.extend(('param', name) for name in _ensure_params(design, plan['params']))
+
+    # ---- Datum sources --------------------------------------------------------
+    # Panels rarely touch the side panel (a shelf or back stops short of it), so a
+    # picked face that doesn't cross the sketch plane is EXTENDED: a hidden
+    # construction plane offset 0 from it, created here so it sits before the
+    # sketches in the timeline. Both sketches then intersect that plane.
+    bottom_src = (_datum_source(comp, bottom_ref[1], fr, f'LB Bottom {suffix}', created)
+                  if bottom_ref is not None else None)
+    top_src = (_datum_source(comp, top_ref[1], fr, f'LB Top {suffix}', created)
+               if top_ref is not None else None)
+    back_src = (_datum_source(comp, back_proxy, fr, f'LB Back {suffix}', created)
+                if back_proxy is not None else None)
 
     # ---- Sketch 1: the live opening -------------------------------------------
     baked_h = f'({plan["span_mm"]})'
@@ -623,8 +645,8 @@ def _build_parametric(comp, proxy_face, back_proxy, front_edge, bp_world, span_s
     open_sk = comp.sketches.add(proxy_face)
     created.append(open_sk)
     _name_sketch(open_sk, f'LB Opening {suffix}')
-    o_bottom = _bottom_datum(open_sk, proxy_face, fr, bottom_ref)
-    o_top = _top_datum(open_sk, proxy_face, fr, top_ref)
+    o_bottom = _bottom_datum(open_sk, proxy_face, fr, bottom_src)
+    o_top = _top_datum(open_sk, proxy_face, fr, top_src)
     if o_top is not None:
         try:
             h_ref = open_sk.sketchDimensions.addOffsetDimension(
@@ -650,12 +672,12 @@ def _build_parametric(comp, proxy_face, back_proxy, front_edge, bp_world, span_s
     created.append(sketch)
     _name_sketch(sketch, f'LB Holes {suffix}')
 
-    bottom_line = _bottom_datum(sketch, proxy_face, fr, bottom_ref)
+    bottom_line = _bottom_datum(sketch, proxy_face, fr, bottom_src)
 
-    if back_proxy is not None:
-        back_line = _intersect_line(sketch, back_proxy)   # where the back panel crosses
+    if back_src is not None:
+        back_line = _face_datum_line(sketch, back_src, fr, fr.height_dir)
         if back_line is None:
-            raise RuntimeError('the back panel face does not cross the side panel')
+            raise RuntimeError('could not reference the back panel face')
     else:
         # No back panel picked: the back column is measured from the side panel's
         # own back edge (matches the preview, where back_depth is 0).
@@ -756,14 +778,18 @@ def _build_parametric(comp, proxy_face, back_proxy, front_edge, bp_world, span_s
 
 
 def _ensure_params(design, specs):
-    """Create or update the wc_lb_* user parameters that drive the holes."""
+    """Create or update the wc_lb_* user parameters that drive the holes. Returns
+    the names it newly created (so a failed build can remove them again)."""
     ups = design.userParameters
+    added = []
     for name, expr, units, comment in specs:
         existing = ups.itemByName(name)
         if existing:
             existing.expression = expr
         else:
             ups.add(name, adsk.core.ValueInput.createByString(expr), units, comment)
+            added.append(name)
+    return added
 
 
 def _safe_name(raw: str) -> str:
@@ -865,6 +891,95 @@ def _intersect_line(sketch: adsk.fusion.Sketch, face):
         if ent.objectType == adsk.fusion.SketchLine.classType():
             return ent
     return None
+
+
+def _face_crosses_plane(face, fr, tol=1e-3):
+    """True when ``face`` genuinely passes through the side panel's sketch plane
+    (vertices on both sides of it), so intersecting the face itself gives a line.
+    A face that stops short of the plane, or only touches it along an edge, does
+    not count — those are extended with a plane instead."""
+    ds = []
+    for v in face.vertices:
+        ds.append(fr.origin.vectorTo(v.geometry).dotProduct(fr.normal))
+    return bool(ds) and min(ds) < -tol and max(ds) > tol
+
+
+def _datum_source(comp, face, fr, name, created):
+    """What a datum line is taken from: the picked ``face`` itself when it crosses
+    the side panel, else a hidden construction plane offset 0 from it — the face
+    extended to infinity, so it always meets the sketch plane, and linked to the
+    face so it follows that panel when the model changes."""
+    if _face_crosses_plane(face, fr):
+        return face
+    planes = comp.constructionPlanes
+    pin = planes.createInput()
+    pin.setByOffset(face, adsk.core.ValueInput.createByReal(0.0))
+    plane = planes.add(pin)
+    created.append(plane)
+    try:
+        plane.name = name
+    except Exception:
+        pass
+    try:
+        plane.isLightBulbOn = False
+    except Exception:
+        pass
+    return plane
+
+
+def _face_datum_line(sketch: adsk.fusion.Sketch, source, fr, along):
+    """A fixed, associative sketch line where ``source`` — a bottom/top/back panel
+    face, or the construction plane extending one (see _datum_source) — meets the
+    sketch plane. Intersection first; a plane that won't intersect is projected
+    (a plane perpendicular to the sketch projects to a line); a face as a last
+    resort projects its edge nearest the side panel running ``along`` it."""
+    try:
+        line = _intersect_line(sketch, source)
+        if line is not None:
+            return line
+    except Exception:
+        pass
+    if source.objectType == adsk.fusion.ConstructionPlane.classType():
+        try:
+            for ent in _iter_vector(sketch.project2([source], True)):
+                if ent.objectType == adsk.fusion.SketchLine.classType():
+                    return ent
+        except Exception:
+            pass
+        return None
+    edge = _nearest_parallel_edge(source, fr, along)
+    if edge is None:
+        return None
+    try:
+        return _project_line(sketch, edge)
+    except Exception:
+        return None
+
+
+def _nearest_parallel_edge(face, fr, along):
+    """The linear edge of ``face`` parallel to ``along`` that lies closest to the
+    side panel's plane (ties prefer the longer edge). Edges pointing at the side
+    panel would project to a point, so they are skipped."""
+    best, best_key = None, None
+    for edge in face.edges:
+        try:
+            a = edge.startVertex.geometry
+            b = edge.endVertex.geometry
+        except Exception:
+            continue
+        v = a.vectorTo(b)
+        length = v.length
+        if length < 1e-4:
+            continue
+        v.normalize()
+        if abs(v.dotProduct(along)) < 0.999:
+            continue
+        mid = adsk.core.Point3D.create((a.x + b.x) / 2.0, (a.y + b.y) / 2.0, (a.z + b.z) / 2.0)
+        dist = abs(fr.origin.vectorTo(mid).dotProduct(fr.normal))
+        key = (round(dist, 6), -length)
+        if best_key is None or key < best_key:
+            best, best_key = edge, key
+    return best
 
 
 def _iter_vector(vec):
