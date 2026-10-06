@@ -484,6 +484,16 @@ def _bore_one(comp, proxy_face, native_face, back_proxy, front_edge, bp_world, s
                     item.deleteMe()
             except Exception:
                 pass
+        # Second pass: a parameter can refuse deletion until the features that
+        # used it are fully gone.
+        for item in created:
+            if isinstance(item, tuple) and item[0] == 'param':
+                try:
+                    up = design.userParameters.itemByName(item[1])
+                    if up:
+                        up.deleteMe()
+                except Exception:
+                    pass
         reason = (str(ex) or ex.__class__.__name__) + ' — holes placed at fixed positions'
         futil.log(f'{CMD_NAME}: parametric build failed ({reason}); using explicit holes',
                   force_console=True)
@@ -618,27 +628,58 @@ def _end_segment(sketch, proxy_face, fr, direction):
 
 
 def _corner_line(sketch, proxy_face, fr, front=True):
-    """A construction line up the side panel's front (or back) extent, joining the
-    front (back) ends of its bottom and top end segments. Both ends ARE those
-    reference points, so it adds no free geometry, and it follows the panel's
-    depth and height in every configuration — unlike its front edge, which a cut
-    (e.g. a Gola channel) splits into pieces that don't exist in other rows."""
+    """A construction line marking the side panel's front (or back) extent, fully
+    defined from its top and bottom END segments (see _end_segment).
+
+    It starts at the OUTERMOST of the two end corners (front: furthest forward)
+    and runs perpendicular to that end segment until it meets the other end
+    segment's line. So a recess cut into one corner only (e.g. a plinth/Gola
+    notch at the bottom-front in some configuration rows) can't tilt it — the
+    column stays vertical and keeps its setback from the panel's real front.
+    Before, the line joined the two corners directly and went slanted whenever
+    one of them was notched."""
     bot = _end_segment(sketch, proxy_face, fr, _neg(fr.height_dir))
     top = _end_segment(sketch, proxy_face, fr, fr.height_dir)
     if bot is None or top is None:
         return None
 
+    def depth(sp):
+        return fr.origin.vectorTo(sp.worldGeometry).dotProduct(fr.depth_dir)
+
     def corner(line):
         ends = (line.startSketchPoint, line.endSketchPoint)
-        depth = lambda sp: fr.origin.vectorTo(sp.worldGeometry).dotProduct(fr.depth_dir)
         return max(ends, key=depth) if front else min(ends, key=depth)
 
+    cb, ct = corner(bot), corner(top)
+    if front:
+        use_top = depth(ct) >= depth(cb) - 1e-6
+    else:
+        use_top = depth(ct) <= depth(cb) + 1e-6
+    anchor, anchor_seg, other_seg = (ct, top, bot) if use_top else (cb, bot, top)
+
     try:
-        line = sketch.sketchCurves.sketchLines.addByTwoPoints(corner(bot), corner(top))
+        # Far end placed straight across at the other end's height, then pinned
+        # there by constraints (perpendicular + on the other end's line).
+        a_w = anchor.worldGeometry
+        o_w = other_seg.startSketchPoint.worldGeometry
+        dh = fr.origin.vectorTo(o_w).dotProduct(fr.height_dir) - \
+            fr.origin.vectorTo(a_w).dotProduct(fr.height_dir)
+        far = a_w.copy()
+        far.translateBy(_scaled_vec(fr.height_dir, dh))
+        line = sketch.sketchCurves.sketchLines.addByTwoPoints(anchor, sketch.modelToSketchSpace(far))
         line.isConstruction = True
+        gc = sketch.geometricConstraints
+        gc.addPerpendicular(line, anchor_seg)
+        gc.addCoincident(line.endSketchPoint, other_seg)
         return line
     except Exception:
         return None
+
+
+def _scaled_vec(vec, s):
+    v = vec.copy()
+    v.scaleBy(s)
+    return v
 
 
 def _bottom_datum(sketch, proxy_face, fr, bottom_ref, picked=False):
@@ -865,16 +906,29 @@ def _build_parametric(comp, proxy_face, back_proxy, front_edge, bp_world, span_s
     created.append(hole_feat)
 
     # Height pattern: qty N at (gap + shelf), from the same live expressions.
-    pattern_ent = adsk.core.ObjectCollection.create()
-    pattern_ent.add(hole_feat)
-    patterns = comp.features.rectangularPatternFeatures
-    pin = patterns.createInput(
-        pattern_ent, up_line,
-        adsk.core.ValueInput.createByString(plan['qty_expr']),
-        adsk.core.ValueInput.createByString(step_expr),
-        adsk.fusion.PatternDistanceType.SpacingPatternDistanceType)
-    pattern_feat = patterns.add(pin)
-    created.append(pattern_feat)
+    # One shelf needs no pattern — the seed set IS the boring — and Fusion
+    # rejects a pattern of quantity 1 ("no pattern instances"), which used to
+    # sink the whole live build into the fixed fallback.
+    if int(p['n']) > 1:
+        pattern_ent = adsk.core.ObjectCollection.create()
+        pattern_ent.add(hole_feat)
+        patterns = comp.features.rectangularPatternFeatures
+        pin = patterns.createInput(
+            pattern_ent, up_line,
+            adsk.core.ValueInput.createByString(plan['qty_expr']),
+            adsk.core.ValueInput.createByString(step_expr),
+            adsk.fusion.PatternDistanceType.SpacingPatternDistanceType)
+        n_before = comp.features.rectangularPatternFeatures.count
+        try:
+            pattern_feat = patterns.add(pin)
+        except Exception:
+            # A failed add can still leave the (broken) feature in the timeline;
+            # make sure the rollback removes it too.
+            if comp.features.rectangularPatternFeatures.count > n_before:
+                created.append(comp.features.rectangularPatternFeatures.item(
+                    comp.features.rectangularPatternFeatures.count - 1))
+            raise
+        created.append(pattern_feat)
 
     if not sketch.isFullyConstrained:
         futil.log(f'{CMD_NAME}: hole sketch for {comp.name} is not fully constrained',
