@@ -24,6 +24,7 @@ from .trim import entry as trim
 from .editThickness import entry as editThickness
 from .shelf import entry as shelf
 from .lineBoring import entry as lineBoring
+from .repairLineBoring import entry as repairLineBoring
 from .convertPanel import entry as convertPanel
 from .configRows import entry as configRows
 from .setFinish import entry as setFinish
@@ -53,6 +54,7 @@ commands = [
     editThickness,
     shelf,
     lineBoring,
+    repairLineBoring,
     convertPanel,
     configRows,
     setFinish,
