@@ -142,7 +142,10 @@ def frame(face, up=None, front_refs=None, back_ref_point=None) -> Frame:
     if up is None:
         up = adsk.core.Vector3D.create(0, 0, 1)
     if front_refs is None:
-        front_refs = [adsk.core.Vector3D.create(0, 1, 0), adsk.core.Vector3D.create(1, 0, 0)]
+        # Fusion's convention: the model's FRONT faces -Y (the Front view looks
+        # from -Y), so a cabinet's doors sit toward -Y. Only used when no back
+        # panel was picked to say which way is front.
+        front_refs = [adsk.core.Vector3D.create(0, -1, 0), adsk.core.Vector3D.create(-1, 0, 0)]
 
     _, normal = face.evaluator.getNormalAtPoint(face.pointOnFace)
     normal.normalize()

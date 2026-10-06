@@ -434,8 +434,9 @@ def _ref_axes(face):
     axes. This keeps boring.frame()'s orientation consistent with the native
     geometry it measures, even for a rotated occurrence."""
     up = adsk.core.Vector3D.create(0, 0, 1)
-    fy = adsk.core.Vector3D.create(0, 1, 0)
-    fx = adsk.core.Vector3D.create(1, 0, 0)
+    # Front faces -Y (Fusion's Front view convention) — see boring.frame().
+    fy = adsk.core.Vector3D.create(0, -1, 0)
+    fx = adsk.core.Vector3D.create(-1, 0, 0)
     occ = face.assemblyContext
     if occ:
         inv = occ.transform.copy()
@@ -558,16 +559,102 @@ def _name_sketch(sketch, name):
         pass
 
 
-def _bottom_datum(sketch, proxy_face, fr, bottom_ref):
+def _clear_auto_projection(sketch):
+    """Delete what Fusion auto-projects when a sketch is created on a face (every
+    edge of that face, if the user has "Auto project edges on reference" on). None
+    of it is used, and those edges are exactly the references that go missing when
+    a configuration changes the panel's shape, flooding the sketch with warnings."""
+    try:
+        origin = sketch.originPoint
+    except Exception:
+        origin = None
+    for coll in (sketch.sketchCurves, sketch.sketchPoints):
+        for ent in [coll.item(i) for i in range(coll.count)]:
+            try:
+                if ent.isReference and ent != origin:
+                    ent.deleteMe()
+            except Exception:
+                pass
+
+
+def _panel_end_face(proxy_face, fr, direction):
+    """The side panel's own planar end face facing ``direction`` (its bottom, top,
+    back or front end), in the same assembly context as ``proxy_face``. Of the
+    faces facing that way, the outermost; ties go to the largest (an end split by
+    a cut-out keeps its biggest piece)."""
+    best, best_key = None, None
+    try:
+        faces = proxy_face.body.faces
+    except Exception:
+        return None
+    for f in faces:
+        try:
+            if f.geometry.surfaceType != adsk.core.SurfaceTypes.PlaneSurfaceType:
+                continue
+            ok, n = f.evaluator.getNormalAtPoint(f.pointOnFace)
+            if not ok or n.dotProduct(direction) < 0.999:
+                continue
+            pos = fr.origin.vectorTo(f.pointOnFace).dotProduct(direction)
+            key = (round(pos, 4), f.area)
+            if best_key is None or key > best_key:
+                best, best_key = f, key
+        except Exception:
+            continue
+    return best
+
+
+def _end_segment(sketch, proxy_face, fr, direction):
+    """The side panel's own bottom (``direction`` = down) or top end face
+    intersected with the sketch plane: a line running the panel's full depth, back
+    corner to front corner. It references the FACE, which configurations leave
+    whole, so it survives rows where the panel's front or back is cut differently."""
+    face = _panel_end_face(proxy_face, fr, direction)
+    if face is None:
+        return None
+    try:
+        return _intersect_line(sketch, face)
+    except Exception:
+        return None
+
+
+def _corner_line(sketch, proxy_face, fr, front=True):
+    """A construction line up the side panel's front (or back) extent, joining the
+    front (back) ends of its bottom and top end segments. Both ends ARE those
+    reference points, so it adds no free geometry, and it follows the panel's
+    depth and height in every configuration — unlike its front edge, which a cut
+    (e.g. a Gola channel) splits into pieces that don't exist in other rows."""
+    bot = _end_segment(sketch, proxy_face, fr, _neg(fr.height_dir))
+    top = _end_segment(sketch, proxy_face, fr, fr.height_dir)
+    if bot is None or top is None:
+        return None
+
+    def corner(line):
+        ends = (line.startSketchPoint, line.endSketchPoint)
+        depth = lambda sp: fr.origin.vectorTo(sp.worldGeometry).dotProduct(fr.depth_dir)
+        return max(ends, key=depth) if front else min(ends, key=depth)
+
+    try:
+        line = sketch.sketchCurves.sketchLines.addByTwoPoints(corner(bot), corner(top))
+        line.isConstruction = True
+        return line
+    except Exception:
+        return None
+
+
+def _bottom_datum(sketch, proxy_face, fr, bottom_ref, picked=False):
     """The bottom datum line in ``sketch``: ``bottom_ref`` (the picked bottom panel's
     face, or the hidden plane extending it — see _datum_source) where it meets the
     sketch plane, else the side panel's own (projected) bottom edge. All of these
     are fixed, associative reference geometry."""
     if bottom_ref is not None:
         line = _face_datum_line(sketch, bottom_ref, fr, fr.depth_dir)
-        if line is None:
+        if line is not None:
+            return line
+        if picked:   # never silently swap a picked panel for the side panel's end
             raise RuntimeError('could not reference the bottom panel face')
-        return line
+    seg = _end_segment(sketch, proxy_face, fr, _neg(fr.height_dir))
+    if seg is not None:
+        return seg
     edge = _find_edge(proxy_face, fr, along=fr.depth_dir, minimize=fr.height_dir,
                       min_len=fr.depth * 0.5)
     if edge is None:
@@ -575,15 +662,19 @@ def _bottom_datum(sketch, proxy_face, fr, bottom_ref):
     return _project_line(sketch, edge)
 
 
-def _top_datum(sketch, proxy_face, fr, top_ref):
+def _top_datum(sketch, proxy_face, fr, top_ref, picked=False):
     """The top datum line: ``top_ref`` (the picked top panel's face or its extending
     plane) where it meets the sketch plane, else the side panel's own top edge
     (projected). None only when neither can be found."""
     if top_ref is not None:
         line = _face_datum_line(sketch, top_ref, fr, fr.depth_dir)
-        if line is None:
+        if line is not None:
+            return line
+        if picked:
             raise RuntimeError('could not reference the top panel face')
-        return line
+    seg = _end_segment(sketch, proxy_face, fr, fr.height_dir)
+    if seg is not None:
+        return seg
     edge = _find_edge(proxy_face, fr, along=fr.depth_dir, minimize=_neg(fr.height_dir),
                       min_len=fr.depth * 0.5)
     return _project_line(sketch, edge) if edge is not None else None
@@ -632,12 +723,21 @@ def _build_parametric(comp, proxy_face, back_proxy, front_edge, bp_world, span_s
     # picked face that doesn't cross the sketch plane is EXTENDED: a hidden
     # construction plane offset 0 from it, created here so it sits before the
     # sketches in the timeline. Both sketches then intersect that plane.
-    bottom_src = (_datum_source(comp, bottom_ref[1], fr, f'LB Bottom {suffix}', created)
-                  if bottom_ref is not None else None)
-    top_src = (_datum_source(comp, top_ref[1], fr, f'LB Top {suffix}', created)
-               if top_ref is not None else None)
-    back_src = (_datum_source(comp, back_proxy, fr, f'LB Back {suffix}', created)
-                if back_proxy is not None else None)
+    #
+    # Never an EDGE: configurations change panel topology (e.g. Gola rows vs plain
+    # rows split the side panel's front edge into pieces), and a projected edge
+    # that doesn't exist in another row breaks the sketch. Faces -> planes survive.
+    # With nothing picked, the side panel's own end faces are used the same way.
+    # The side panel's OWN extents (its front, and its back/bottom/top when no
+    # panel is picked) come from its top and bottom END faces intersected with the
+    # sketch plane — see _end_segment / _corner_line. Those end faces stay whole in
+    # every configuration, whereas its front face is cut up differently per row.
+    def src(face, name):
+        return _datum_source(comp, face, fr, f'{name} {suffix}', created) if face is not None else None
+
+    bottom_src = src(bottom_ref[1], 'LB Bottom') if bottom_ref is not None else None
+    top_src = src(top_ref[1], 'LB Top') if top_ref is not None else None
+    back_src = src(back_proxy, 'LB Back') if back_proxy is not None else None
 
     # ---- Sketch 1: the live opening -------------------------------------------
     baked_h = f'({plan["span_mm"]})'
@@ -645,8 +745,9 @@ def _build_parametric(comp, proxy_face, back_proxy, front_edge, bp_world, span_s
     open_sk = comp.sketches.add(proxy_face)
     created.append(open_sk)
     _name_sketch(open_sk, f'LB Opening {suffix}')
-    o_bottom = _bottom_datum(open_sk, proxy_face, fr, bottom_src)
-    o_top = _top_datum(open_sk, proxy_face, fr, top_src)
+    _clear_auto_projection(open_sk)
+    o_bottom = _bottom_datum(open_sk, proxy_face, fr, bottom_src, bottom_ref is not None)
+    o_top = _top_datum(open_sk, proxy_face, fr, top_src, top_ref is not None)
     if o_top is not None:
         try:
             h_ref = open_sk.sketchDimensions.addOffsetDimension(
@@ -671,14 +772,17 @@ def _build_parametric(comp, proxy_face, back_proxy, front_edge, bp_world, span_s
     sketch = comp.sketches.add(proxy_face)
     created.append(sketch)
     _name_sketch(sketch, f'LB Holes {suffix}')
+    _clear_auto_projection(sketch)
 
-    bottom_line = _bottom_datum(sketch, proxy_face, fr, bottom_src)
+    bottom_line = _bottom_datum(sketch, proxy_face, fr, bottom_src, bottom_ref is not None)
 
-    if back_src is not None:
-        back_line = _face_datum_line(sketch, back_src, fr, fr.height_dir)
-        if back_line is None:
-            raise RuntimeError('could not reference the back panel face')
-    else:
+    back_line = (_face_datum_line(sketch, back_src, fr, fr.height_dir)
+                 if back_src is not None else None)
+    if back_line is None and back_proxy is not None:
+        raise RuntimeError('could not reference the back panel face')
+    if back_line is None:
+        back_line = _corner_line(sketch, proxy_face, fr, front=False)
+    if back_line is None:
         # No back panel picked: the back column is measured from the side panel's
         # own back edge (matches the preview, where back_depth is 0).
         back_edge = _find_edge(proxy_face, fr, along=fr.height_dir, minimize=fr.depth_dir,
@@ -687,11 +791,15 @@ def _build_parametric(comp, proxy_face, back_proxy, front_edge, bp_world, span_s
             raise RuntimeError('could not find the side panel\'s back edge (pick the back panel)')
         back_line = _project_line(sketch, back_edge)
 
-    front_ref = front_edge if front_edge is not None else _find_edge(
-        proxy_face, fr, along=fr.height_dir, minimize=_neg(fr.depth_dir), min_len=fr.height * 0.5)
-    if front_ref is None:
-        raise RuntimeError('could not find the side panel\'s front edge (pick one)')
-    front_line = _project_line(sketch, front_ref)
+    front_line = _corner_line(sketch, proxy_face, fr, front=True) if front_edge is None else None
+    if front_line is None:
+        # A picked front edge (the user's explicit choice), else last-resort edge.
+        front_ref = front_edge if front_edge is not None else _find_edge(
+            proxy_face, fr, along=fr.height_dir, minimize=_neg(fr.depth_dir),
+            min_len=fr.height * 0.5)
+        if front_ref is None:
+            raise RuntimeError('could not find the side panel\'s front edge (pick one)')
+        front_line = _project_line(sketch, front_ref)
 
     n_expr, shelf_expr, rise_expr, pitch_expr = (
         plan['n_expr'], plan['shelf_expr'], plan['rise_expr'], plan['pitch_expr'])
